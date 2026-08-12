@@ -17,6 +17,7 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 from fastapi import APIRouter, HTTPException
+from database.douyin_state import list_checkpoints
 
 from ..schemas import CrawlerStartRequest, CrawlerStatusResponse
 from ..services import crawler_manager
@@ -61,3 +62,16 @@ async def get_logs(limit: int = 100):
     """Get recent logs"""
     logs = crawler_manager.logs[-limit:] if limit > 0 else crawler_manager.logs
     return {"logs": [log.model_dump() for log in logs]}
+
+
+@router.get("/progress")
+async def get_crawler_progress(limit: int = 100):
+    """Get structured Douyin checkpoint progress; other platforms return no items."""
+    current = crawler_manager.current_config
+    if current is not None and current.platform.value != "dy":
+        return {"platform": current.platform.value, "items": []}
+    items = await list_checkpoints(limit)
+    return {
+        "platform": "dy",
+        "items": [item.model_dump(exclude={"pending_items"}) for item in items],
+    }

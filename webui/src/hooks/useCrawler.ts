@@ -76,6 +76,18 @@ export function useCrawlerLogs() {
   })
 }
 
+export function useDouyinProgress(enabled: boolean) {
+  return useQuery({
+    queryKey: ['douyinProgress'],
+    queryFn: async () => {
+      const { data } = await crawlerApi.getProgress(100)
+      return data.items
+    },
+    enabled,
+    refetchInterval: enabled ? 2000 : false,
+  })
+}
+
 export function usePlatforms() {
   return useQuery({
     queryKey: ['platforms'],

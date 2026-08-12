@@ -89,3 +89,25 @@ async def save_checkpoint(checkpoint: DouyinCrawlCheckpoint) -> None:
             values,
         )
         await db.commit()
+
+
+async def list_checkpoints(limit: int = 100) -> list[DouyinCrawlCheckpoint]:
+    """Return the most recently updated Douyin task checkpoints."""
+    await initialize_state_db()
+    safe_limit = max(1, min(limit, 500))
+    async with aiosqlite.connect(STATE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM crawl_checkpoint ORDER BY updated_at DESC LIMIT ?",
+            (safe_limit,),
+        )
+        rows = await cursor.fetchall()
+    checkpoints = []
+    for row in rows:
+        values = dict(row)
+        try:
+            values["pending_items"] = json.loads(values.get("pending_items") or "[]")
+        except json.JSONDecodeError:
+            values["pending_items"] = []
+        checkpoints.append(DouyinCrawlCheckpoint(**values))
+    return checkpoints

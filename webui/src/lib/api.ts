@@ -30,6 +30,18 @@ export interface CrawlerStatus {
   error_message: string | null
 }
 
+export interface DouyinProgressItem {
+  scope: string
+  scope_id: string
+  cursor: string
+  sub_cursor: string
+  status: 'running' | 'complete' | 'partial' | 'failed'
+  expected_count: number | null
+  collected_count: number
+  last_error: string
+  updated_at: number
+}
+
 export interface LogEntry {
   id: number
   timestamp: string
@@ -69,6 +81,9 @@ export const crawlerApi = {
   stop: () => api.post('/crawler/stop'),
   getStatus: () => api.get<CrawlerStatus>('/crawler/status'),
   getLogs: (limit = 100) => api.get<{ logs: LogEntry[] }>('/crawler/logs', { params: { limit } }),
+  getProgress: (limit = 100) => api.get<{ platform: string; items: DouyinProgressItem[] }>(
+    '/crawler/progress', { params: { limit } },
+  ),
 }
 
 export const dataApi = {

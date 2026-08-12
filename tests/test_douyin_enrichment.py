@@ -204,6 +204,23 @@ def test_checkpoint_round_trip(monkeypatch, tmp_path):
     assert loaded.collected_count == 17
 
 
+def test_checkpoint_list_is_recent_first_and_bounded(monkeypatch, tmp_path):
+    from model.m_douyin import DouyinCrawlCheckpoint
+
+    monkeypatch.setattr(douyin_state, "STATE_PATH", tmp_path / "crawl_state.sqlite")
+    asyncio.run(douyin_state.save_checkpoint(DouyinCrawlCheckpoint(
+        scope="search", scope_id="old", status="complete", updated_at=1,
+    )))
+    asyncio.run(douyin_state.save_checkpoint(DouyinCrawlCheckpoint(
+        scope="topic", scope_id="new", status="partial", last_error="risk", updated_at=2,
+    )))
+
+    items = asyncio.run(douyin_state.list_checkpoints(limit=1))
+    assert [(item.scope, item.scope_id, item.status) for item in items] == [
+        ("topic", "new", "partial")
+    ]
+
+
 def test_topic_id_parser_accepts_id_and_url_forms():
     assert parse_topic_id_from_url("123456") == "123456"
     assert parse_topic_id_from_url("https://www.douyin.com/challenge/98765") == "98765"

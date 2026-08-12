@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { useCrawlerStore } from '@/store/crawlerStore'
-import { usePlatforms, useConfigOptions, useStartCrawler, useStopCrawler } from '@/hooks/useCrawler'
+import { usePlatforms, useConfigOptions, useStartCrawler, useStopCrawler, useDouyinProgress } from '@/hooks/useCrawler'
 import { ParsedIdList } from './ParsedIdList'
 
 type SectionProps = {
@@ -141,6 +141,7 @@ export function CrawlerConfigPanel() {
   const { data: options } = useConfigOptions()
   const { mutate: startCrawler, isPending: isStarting } = useStartCrawler()
   const { mutate: stopCrawler, isPending: isStopping } = useStopCrawler()
+  const { data: progressItems = [] } = useDouyinProgress(config.platform === 'dy')
 
   const isDisabled = status === 'running' || status === 'stopping'
   const isRunning = status === 'running'
@@ -473,6 +474,51 @@ export function CrawlerConfigPanel() {
           </div>
         </Section>
       )}
+
+      {config.platform === 'dy' && progressItems.length > 0 ? (
+        <Section
+          title="抖音任务状态"
+          description="结构化展示最近的采集检查点、数量与失败原因"
+          icon={Play}
+        >
+          <div className="overflow-x-auto rounded-lg border border-cyber-border-subtle">
+            <table className="w-full min-w-[720px] text-left text-xs font-mono">
+              <thead className="bg-cyber-bg-tertiary/70 text-cyber-text-muted">
+                <tr>
+                  <th className="px-3 py-2 font-medium">类型</th>
+                  <th className="px-3 py-2 font-medium">对象</th>
+                  <th className="px-3 py-2 font-medium">状态</th>
+                  <th className="px-3 py-2 font-medium">进度</th>
+                  <th className="px-3 py-2 font-medium">错误</th>
+                </tr>
+              </thead>
+              <tbody>
+                {progressItems.map((item) => (
+                  <tr key={`${item.scope}:${item.scope_id}`} className="border-t border-cyber-border-subtle/60">
+                    <td className="px-3 py-2 text-cyber-text-secondary">{item.scope}</td>
+                    <td className="max-w-[240px] truncate px-3 py-2 text-cyber-text-primary" title={item.scope_id}>
+                      {item.scope_id}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className={item.status === 'complete'
+                        ? 'text-emerald-400'
+                        : item.status === 'failed' ? 'text-cyber-neon-pink' : 'text-cyber-neon-orange'}>
+                        {item.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-cyber-text-secondary">
+                      {item.collected_count}{item.expected_count == null ? '' : ` / ${item.expected_count}`}
+                    </td>
+                    <td className="max-w-[320px] truncate px-3 py-2 text-cyber-neon-pink" title={item.last_error}>
+                      {item.last_error || '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      ) : null}
 
       {/* Row 2: Start/Stop Button - Full Width */}
       <div className="w-full">
