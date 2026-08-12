@@ -125,6 +125,9 @@ class CrawlerManager:
 
             try:
                 # Start subprocess
+                creationflags = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                )
                 self.process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -133,7 +136,8 @@ class CrawlerManager:
                     encoding='utf-8',
                     bufsize=1,
                     cwd=str(self._project_root),
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"}
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                    creationflags=creationflags,
                 )
 
                 self.status = "running"
@@ -163,11 +167,17 @@ class CrawlerManager:
                 return False
 
             self.status = "stopping"
-            entry = self._create_log_entry("Sending SIGTERM to crawler process...", "warning")
+            graceful_signal = (
+                signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM
+            )
+            signal_name = "CTRL_BREAK" if os.name == "nt" else "SIGTERM"
+            entry = self._create_log_entry(
+                f"Sending {signal_name} to crawler process...", "warning"
+            )
             await self._push_log(entry)
 
             try:
-                self.process.send_signal(signal.SIGTERM)
+                self.process.send_signal(graceful_signal)
 
                 # Wait for graceful exit (up to 15 seconds)
                 for _ in range(30):

@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 import pytest
 import config
+import asyncio
+import os
+import signal
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from cmd_arg import parse_cmd
@@ -170,3 +173,31 @@ def test_api_rejects_topic_and_douyin_options_for_other_platforms():
     })
     assert topic_response.status_code == 422
     assert option_response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_crawler_manager_uses_windows_graceful_break_signal(monkeypatch):
+    manager = CrawlerManager()
+
+    class FakeProcess:
+        def __init__(self):
+            self.signals = []
+            self.running = True
+
+        def poll(self):
+            return None if self.running else 0
+
+        def send_signal(self, value):
+            self.signals.append(value)
+            self.running = False
+
+        def kill(self):
+            raise AssertionError("graceful stop should not force kill")
+
+    process = FakeProcess()
+    manager.process = process
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    assert await manager.stop() is True
+    assert process.signals == [signal.CTRL_BREAK_EVENT]

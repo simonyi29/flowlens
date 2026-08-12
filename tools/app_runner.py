@@ -90,6 +90,8 @@ def run(
         except NotImplementedError:
             signal.signal(signal.SIGINT, lambda signum, _frame: _on_signal(signum))
             signal.signal(signal.SIGTERM, lambda signum, _frame: _on_signal(signum))
+            if hasattr(signal, "SIGBREAK"):
+                signal.signal(signal.SIGBREAK, lambda signum, _frame: _on_signal(signum))
 
         cancelled = False
         try:
