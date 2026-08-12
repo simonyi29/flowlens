@@ -111,12 +111,74 @@ def test_sqlite_migration_is_idempotent(tmp_path):
                     await conn.execute(text("PRAGMA table_info(douyin_aweme_comment)"))
                 ).fetchall()
             }
+            aweme_indexes = {
+                row[1]
+                for row in (
+                    await conn.execute(text("PRAGMA index_list(douyin_aweme)"))
+                ).fetchall()
+            }
+            comment_indexes = {
+                row[1]
+                for row in (
+                    await conn.execute(text("PRAGMA index_list(douyin_aweme_comment)"))
+                ).fetchall()
+            }
         await engine.dispose()
-        return aweme_columns, comment_columns
+        return aweme_columns, comment_columns, aweme_indexes, comment_indexes
 
-    aweme_columns, comment_columns = asyncio.run(scenario())
+    aweme_columns, comment_columns, aweme_indexes, comment_indexes = asyncio.run(scenario())
     assert {"play_count", "duration_ms", "source_topic", "raw_payload"} <= aweme_columns
     assert {"root_comment_id", "level", "crawl_run_id"} <= comment_columns
+    assert "ix_douyin_aweme_aweme_id" in aweme_indexes
+    assert "ix_douyin_aweme_comment_comment_id" in comment_indexes
+
+
+def test_creator_posts_use_private_checkpoint_and_strict_cap(monkeypatch):
+    import media_platform.douyin.client as client_module
+
+    raw_creator_id = "MS4wLjAB-sensitive"
+    captured_checkpoints = []
+    callbacks = []
+    pages = [
+        {
+            "aweme_list": [
+                {"aweme_id": "1"}, {"aweme_id": "1"},
+                {"aweme_id": "2"}, {"aweme_id": "3"},
+            ],
+            "has_more": 1,
+            "max_cursor": "next",
+        }
+    ]
+    client = object.__new__(DouYinClient)
+
+    async def no_checkpoint(scope, scope_id):
+        assert scope == "creator_posts"
+        assert scope_id == anonymize_user_id(raw_creator_id)
+        assert raw_creator_id not in scope_id
+        return None
+
+    async def save(item):
+        captured_checkpoints.append(item)
+
+    async def get_page(_sec_user_id, _cursor):
+        return pages.pop(0)
+
+    async def callback(items):
+        callbacks.append([item["aweme_id"] for item in items])
+
+    monkeypatch.setattr(client_module, "load_checkpoint", no_checkpoint)
+    monkeypatch.setattr(client_module, "save_checkpoint", save)
+    monkeypatch.setattr(client, "get_user_aweme_posts", get_page)
+
+    result = asyncio.run(
+        client.get_all_user_aweme_posts(raw_creator_id, callback=callback, max_count=2)
+    )
+
+    assert [item["aweme_id"] for item in result] == ["1", "2"]
+    assert callbacks == [["1", "2"]]
+    assert captured_checkpoints[-1].scope_id == anonymize_user_id(raw_creator_id)
+    assert captured_checkpoints[-1].status == "complete"
+    assert captured_checkpoints[-1].collected_count == 2
 
 
 def test_checkpoint_round_trip(monkeypatch, tmp_path):
@@ -299,6 +361,17 @@ def test_native_caption_parsing_and_srt():
     assert "00:00:00,000 --> 00:00:01,250" in segments_to_srt(segments)
 
 
+def test_webvtt_caption_parsing_supports_minute_timestamps_and_cue_settings():
+    segments = parse_caption_payload(
+        "WEBVTT\n\n00:01.250 --> 00:03.500 align:start position:0%\n第一句\n\n"
+        "2\n00:00:04.000 --> 00:00:05.000\n第二句"
+    )
+    assert [(item.start_ms, item.end_ms, item.text) for item in segments] == [
+        (1250, 3500, "第一句"),
+        (4000, 5000, "第二句"),
+    ]
+
+
 def test_native_caption_service_saves_completed(monkeypatch, tmp_path):
     import media_platform.douyin.transcript as transcript_module
 
@@ -353,6 +426,51 @@ def test_asr_failure_always_removes_temporary_media(monkeypatch, tmp_path):
     else:
         raise AssertionError("ASR failure should propagate to the worker")
     assert not list((tmp_path / "data/douyin/tmp").glob("*.mp4"))
+
+
+def test_transcript_cancel_marks_active_and_queued_jobs_retryable(monkeypatch):
+    import media_platform.douyin.transcript as transcript_module
+
+    saved = []
+    checkpoints = []
+
+    async def scenario():
+        processing_started = asyncio.Event()
+
+        async def downloader(_url):
+            return None
+
+        async def save_transcript(item):
+            saved.append(item)
+
+        async def no_checkpoint(_scope, _scope_id):
+            return None
+
+        async def save_checkpoint(item):
+            checkpoints.append(item)
+
+        service = DouyinTranscriptService(downloader)
+
+        async def blocked_process(_item):
+            processing_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(transcript_module.douyin_store, "save_transcript", save_transcript)
+        monkeypatch.setattr(transcript_module, "load_checkpoint", no_checkpoint)
+        monkeypatch.setattr(transcript_module, "save_checkpoint", save_checkpoint)
+        monkeypatch.setattr(service, "_process", blocked_process)
+
+        await service.enqueue({"aweme_id": "active"})
+        await processing_started.wait()
+        await service.enqueue({"aweme_id": "queued"})
+        await service.cancel_and_close()
+
+    asyncio.run(scenario())
+
+    failed_ids = {item.aweme_id for item in saved if item.status == "failed"}
+    assert failed_ids == {"active", "queued"}
+    assert {item.scope_id for item in checkpoints} == {"active", "queued"}
+    assert all(item.status == "partial" for item in checkpoints)
 
 
 def test_keyword_search_respects_small_limit_and_fetches_details(monkeypatch):

@@ -46,14 +46,16 @@ def parse_caption_payload(payload: bytes | str | dict | list) -> list[DouyinTran
             blocks = re.split(r"\n\s*\n", stripped.replace("\r\n", "\n"))
             parsed = []
             pattern = re.compile(
-                r"(?:(?:\d+)\n)?(\d\d):(\d\d):(\d\d)[,.](\d{3})\s*-->\s*"
-                r"(\d\d):(\d\d):(\d\d)[,.](\d{3})\n(.+)", re.S
+                r"(?:(?:\d+)\n)?"
+                r"(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{3})\s*-->\s*"
+                r"(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{3})[^\n]*\n(.+)",
+                re.S,
             )
             for block in blocks:
                 match = pattern.search(block.strip())
                 if not match:
                     continue
-                values = [int(value) for value in match.groups()[:8]]
+                values = [int(value or 0) for value in match.groups()[:8]]
                 start = ((values[0] * 60 + values[1]) * 60 + values[2]) * 1000 + values[3]
                 end = ((values[4] * 60 + values[5]) * 60 + values[6]) * 1000 + values[7]
                 parsed.append(DouyinTranscriptSegment(start_ms=start, end_ms=end, text=match.group(9).strip()))
@@ -120,12 +122,16 @@ class DouyinTranscriptService:
         self.queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=20)
         self.worker_task: asyncio.Task | None = None
         self.model = None
+        self._close_lock = asyncio.Lock()
+        self._closing = False
 
     async def start(self) -> None:
         if self.worker_task is None:
             self.worker_task = asyncio.create_task(self._worker())
 
     async def enqueue(self, aweme: dict[str, Any]) -> None:
+        if self._closing:
+            raise RuntimeError("transcript service is closing")
         aweme_id = str(aweme.get("aweme_id") or "")
         checkpoint = await load_checkpoint("transcript", aweme_id)
         if checkpoint and checkpoint.status == "complete":
@@ -140,12 +146,34 @@ class DouyinTranscriptService:
         await self.queue.put(aweme)
 
     async def drain_and_close(self) -> None:
-        if self.worker_task is None:
-            return
-        await self.queue.join()
-        await self.queue.put(None)
-        await self.worker_task
-        self.worker_task = None
+        async with self._close_lock:
+            if self.worker_task is None:
+                return
+            self._closing = True
+            await self.queue.join()
+            await self.queue.put(None)
+            await self.worker_task
+            self.worker_task = None
+
+    async def cancel_and_close(self) -> None:
+        """Cancel active ASR and persist queued transcript jobs as retryable failures."""
+        async with self._close_lock:
+            if self.worker_task is None:
+                return
+            self._closing = True
+            while True:
+                try:
+                    item = self.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    if item is not None:
+                        await self._save_failure(item, "task cancelled during shutdown")
+                finally:
+                    self.queue.task_done()
+            self.worker_task.cancel()
+            await asyncio.gather(self.worker_task, return_exceptions=True)
+            self.worker_task = None
 
     async def _worker(self) -> None:
         while True:

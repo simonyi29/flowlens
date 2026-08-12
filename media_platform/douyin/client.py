@@ -30,6 +30,7 @@ from base.base_crawler import AbstractApiClient
 from proxy.proxy_mixin import ProxyRefreshMixin
 from tools import utils
 from tools.httpx_util import make_async_client
+from tools.user_hash import anonymize_user_id
 from database.douyin_state import load_checkpoint, save_checkpoint
 from model.m_douyin import DouyinCrawlCheckpoint
 from var import request_keyword_var
@@ -463,42 +464,64 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         }
         return await self.get(uri, params)
 
-    async def get_all_user_aweme_posts(self, sec_user_id: str, callback: Optional[Callable] = None):
-        checkpoint = await load_checkpoint("creator_posts", sec_user_id)
+    async def get_all_user_aweme_posts(
+        self,
+        sec_user_id: str,
+        callback: Optional[Callable] = None,
+        max_count: int = 0,
+    ):
+        checkpoint_id = anonymize_user_id(sec_user_id)
+        checkpoint = await load_checkpoint("creator_posts", checkpoint_id)
         if checkpoint and checkpoint.status == "complete":
             return []
         posts_has_more = 1
         max_cursor = checkpoint.cursor if checkpoint else ""
         collected = checkpoint.collected_count if checkpoint else 0
         result = []
+        seen_aweme_ids: set[str] = set()
+        if max_count > 0 and collected >= max_count:
+            return result
         try:
-            while posts_has_more == 1:
+            while posts_has_more == 1 and (max_count <= 0 or collected < max_count):
                 current_cursor = max_cursor
                 aweme_post_res = await self.get_user_aweme_posts(sec_user_id, max_cursor)
                 posts_has_more = aweme_post_res.get("has_more", 0)
                 next_cursor = str(aweme_post_res.get("max_cursor") or current_cursor)
                 aweme_list = aweme_post_res.get("aweme_list") or []
-                utils.logger.info(f"[DouYinClient.get_all_user_aweme_posts] get sec_user_id:{sec_user_id} video len : {len(aweme_list)}")
+                unique_awemes = []
+                for aweme in aweme_list:
+                    aweme_id = str(aweme.get("aweme_id") or "")
+                    if not aweme_id or aweme_id in seen_aweme_ids:
+                        continue
+                    seen_aweme_ids.add(aweme_id)
+                    unique_awemes.append(aweme)
+                if max_count > 0:
+                    unique_awemes = unique_awemes[: max_count - collected]
+                utils.logger.info(
+                    f"[DouYinClient.get_all_user_aweme_posts] creator:{checkpoint_id} "
+                    f"video len:{len(unique_awemes)}"
+                )
                 if callback:
-                    await callback(aweme_list)
-                result.extend(aweme_list)
-                collected += len(aweme_list)
+                    await callback(unique_awemes)
+                result.extend(unique_awemes)
+                collected += len(unique_awemes)
                 max_cursor = next_cursor
+                reached_limit = max_count > 0 and collected >= max_count
                 await save_checkpoint(
                     DouyinCrawlCheckpoint(
-                        scope="creator_posts", scope_id=sec_user_id,
+                        scope="creator_posts", scope_id=checkpoint_id,
                         cursor=max_cursor,
-                        status="running" if posts_has_more else "complete",
+                        status="complete" if reached_limit or not posts_has_more else "running",
                         collected_count=collected,
                         updated_at=utils.get_current_timestamp(),
                     )
                 )
-                if not aweme_list or next_cursor == current_cursor:
+                if reached_limit or not aweme_list or next_cursor == current_cursor:
                     break
         except Exception as exc:
             await save_checkpoint(
                 DouyinCrawlCheckpoint(
-                    scope="creator_posts", scope_id=sec_user_id,
+                    scope="creator_posts", scope_id=checkpoint_id,
                     cursor=max_cursor, status="partial" if collected else "failed",
                     collected_count=collected, last_error=str(exc),
                     updated_at=utils.get_current_timestamp(),

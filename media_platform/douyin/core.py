@@ -146,7 +146,11 @@ class DouYinCrawler(AbstractCrawler):
                     await self.get_creators_and_videos()
                 elif config.CRAWLER_TYPE == "topic":
                     await self.search_topics()
-            finally:
+            except asyncio.CancelledError:
+                if self.transcript_service:
+                    await self.transcript_service.cancel_and_close()
+                raise
+            else:
                 if self.transcript_service:
                     await self.transcript_service.drain_and_close()
 
@@ -524,7 +528,10 @@ class DouYinCrawler(AbstractCrawler):
             try:
                 creator_info_parsed = parse_creator_info_from_url(creator_url)
                 user_id = creator_info_parsed.sec_user_id
-                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Parsed sec_user_id: {user_id} from {creator_url}")
+                utils.logger.info(
+                    f"[DouYinCrawler.get_creators_and_videos] Parsed creator: "
+                    f"{anonymize_user_id(user_id)}"
+                )
             except ValueError as e:
                 utils.logger.error(f"[DouYinCrawler.get_creators_and_videos] Failed to parse creator URL: {e}")
                 continue
@@ -532,7 +539,11 @@ class DouYinCrawler(AbstractCrawler):
             await self.fetch_creator_profile(user_id)
 
             # Get all video information of the creator
-            all_video_list = await self.dy_client.get_all_user_aweme_posts(sec_user_id=user_id, callback=self.fetch_creator_video_detail)
+            all_video_list = await self.dy_client.get_all_user_aweme_posts(
+                sec_user_id=user_id,
+                callback=self.fetch_creator_video_detail,
+                max_count=config.CRAWLER_MAX_NOTES_COUNT,
+            )
 
             video_ids = [video_item.get("aweme_id") for video_item in all_video_list]
             await self.batch_get_note_comments(video_ids)

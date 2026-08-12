@@ -123,6 +123,13 @@ async def main() -> None:
 async def async_cleanup() -> None:
     global crawler
     if crawler:
+        transcript_service = getattr(crawler, "transcript_service", None)
+        if transcript_service:
+            try:
+                await transcript_service.cancel_and_close()
+            except Exception as e:
+                print(f"[Main] Error stopping transcript service: {e}")
+
         if getattr(crawler, "cdp_manager", None):
             try:
                 await crawler.cdp_manager.cleanup(force=True)
