@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any, Dict, Optional
 
 import config
@@ -27,6 +28,9 @@ SENSITIVE_KEYS = {
     "avatar_larger",
     "signature",
     "gender",
+    "user_age",
+    "age",
+    "birthday",
     "ip_label",
     "ip_location",
     "province",
@@ -116,8 +120,18 @@ def sanitize_raw_payload(value: Any, *, _person_context: bool = False) -> Any:
             or (is_person_context and normalized_key in PERSON_PROFILE_MEDIA_KEYS)
         ):
             continue
-        if normalized_key in {"nickname", "name", "screen_name"}:
+        if (
+            normalized_key in {"nickname", "name", "screen_name"}
+            or normalized_key.endswith("_nickname")
+            or (normalized_key == "author" and isinstance(item, str))
+        ):
             sanitized[key] = mask_nickname(item)
+        elif normalized_key == "title" and isinstance(item, str):
+            original_sound = re.fullmatch(r"@(.+)创作的原声", item.strip())
+            sanitized[key] = (
+                f"@{mask_nickname(original_sound.group(1))}创作的原声"
+                if original_sound else copy.deepcopy(item)
+            )
         else:
             sanitized[key] = sanitize_raw_payload(item, _person_context=is_person_context)
     return sanitized

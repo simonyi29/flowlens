@@ -105,11 +105,14 @@ def test_sanitize_raw_payload_removes_real_douyin_token_and_profile_media_shape(
         },
         "video": {"play_addr": {"url_list": ["https://content-video"]}},
         "music": {
+            "author": "创作者昵称",
+            "title": "@创作者昵称创作的原声",
             "cover_hd": {
                 "url_list": ["https://p3.douyinpic.com/aweme-avatar/private.jpeg"]
             },
         },
-        "ent_log_extra": '{"aweme_log_extra":{"author_id":"nested-raw-id"}}',
+        "user_age": 36,
+        "ent_log_extra": '{"aweme_log_extra":{"author_id":"nested-raw-id","item_author_nickname":"创作者昵称"}}',
     })
     raw_text = json.dumps(sanitized, ensure_ascii=False)
     assert "secret-token" not in raw_text
@@ -119,9 +122,13 @@ def test_sanitize_raw_payload_removes_real_douyin_token_and_profile_media_shape(
     assert "https://avatar" not in raw_text
     assert "personal-qr" not in raw_text
     assert "nested-raw-id" not in raw_text
+    assert '"user_age"' not in raw_text
+    assert "创作者昵称" not in raw_text
     assert "aweme-avatar" not in raw_text
     assert "https://content-video" in raw_text
     assert sanitized["author"]["nickname"] == mask_nickname("创作者昵称")
+    assert sanitized["music"]["author"] == mask_nickname("创作者昵称")
+    assert sanitized["music"]["title"] == f"@{mask_nickname('创作者昵称')}创作的原声"
 
 
 def test_sqlite_migration_is_idempotent(tmp_path):
@@ -731,6 +738,48 @@ def test_native_caption_service_saves_completed(monkeypatch, tmp_path):
     assert saved[-1].status == "native_completed"
     assert saved[-1].full_text == "原生字幕"
     assert (tmp_path / "data/douyin/transcripts/n1.srt").exists()
+
+
+def test_douyin_ai_chapters_are_treated_as_native_transcript(monkeypatch, tmp_path):
+    import media_platform.douyin.transcript as transcript_module
+
+    saved = []
+
+    async def save_transcript(item):
+        saved.append(item)
+
+    async def no_checkpoint(*_args):
+        return None
+
+    async def ignore_checkpoint(*_args):
+        return None
+
+    async def scenario():
+        service = DouyinTranscriptService(lambda _url: None)
+        await service.enqueue({
+            "aweme_id": "chapter-native",
+            "duration": 3000,
+            "chapter_list": [
+                {"timestamp": 0, "desc": "开场", "detail": ""},
+                {"timestamp": 1000, "desc": "正文", "detail": "平台生成的正文"},
+            ],
+        })
+        await service.drain_and_close()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "DY_ENABLE_NATIVE_SUBTITLE", True)
+    monkeypatch.setattr(config, "DY_ENABLE_ASR", False)
+    monkeypatch.setattr(transcript_module.douyin_store, "save_transcript", save_transcript)
+    monkeypatch.setattr(transcript_module, "load_checkpoint", no_checkpoint)
+    monkeypatch.setattr(transcript_module, "save_checkpoint", ignore_checkpoint)
+    asyncio.run(scenario())
+
+    completed = saved[-1]
+    assert completed.status == "native_completed"
+    assert completed.source == "native"
+    assert [segment.start_ms for segment in completed.segments] == [0, 1000]
+    assert [segment.end_ms for segment in completed.segments] == [1000, 3000]
+    assert completed.full_text == "开场\n平台生成的正文"
 
 
 def test_asr_failure_always_removes_temporary_media(monkeypatch, tmp_path):

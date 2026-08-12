@@ -90,6 +90,29 @@ def parse_caption_payload(payload: bytes | str | dict | list) -> list[DouyinTran
 
 def find_native_caption(aweme: dict[str, Any]) -> tuple[Any, str]:
     """Return an inline caption payload or URL and its language."""
+    chapters = aweme.get("chapter_list") or []
+    if isinstance(chapters, list) and chapters:
+        duration = int(aweme.get("duration") or (aweme.get("video") or {}).get("duration") or 0)
+        chapter_segments = []
+        for index, chapter in enumerate(chapters):
+            if not isinstance(chapter, dict):
+                continue
+            start = int(chapter.get("timestamp") or 0)
+            next_start = (
+                int(chapters[index + 1].get("timestamp") or start)
+                if index + 1 < len(chapters) and isinstance(chapters[index + 1], dict)
+                else duration
+            )
+            text = str(chapter.get("detail") or chapter.get("desc") or "").strip()
+            if text:
+                chapter_segments.append({
+                    "start_time": start,
+                    "end_time": max(next_start, start),
+                    "text": text,
+                })
+        if chapter_segments:
+            return chapter_segments, "zh"
+
     candidates = []
     video = aweme.get("video") or {}
     for value in (
