@@ -1181,7 +1181,7 @@ def test_crawler_cancellation_uses_transcript_cancel_path(monkeypatch):
             return None
 
     class FakePage:
-        async def goto(self, _url):
+        async def goto(self, _url, **_kwargs):
             return None
 
     class FakeBrowserContext:

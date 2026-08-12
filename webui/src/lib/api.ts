@@ -116,4 +116,33 @@ export const envApi = {
   check: () => api.get<EnvCheckResult>('/env/check'),
 }
 
+export const taskApi = {
+  list: () => api.get<{items: import('@/types/crawler').TaskRun[]}>('/tasks'),
+  detail: (id:string) => api.get(`/tasks/${id}`),
+  items: (id:string) => api.get(`/tasks/${id}/items`),
+  logs: (id:string) => api.get(`/tasks/${id}/logs`),
+  pause: (id:string) => api.post(`/tasks/${id}/pause`),
+  resume: (id:string) => api.post(`/tasks/${id}/resume`),
+  cancel: (id:string) => api.post(`/tasks/${id}/cancel`),
+  retry: (id:string) => api.post(`/tasks/${id}/retry-failed`),
+}
+export const mediaApi = {
+  list: () => api.get<{items: import('@/types/crawler').MediaAsset[]}>('/media'),
+  streamUrl: (id:string) => `/api/media/${id}/stream`,
+  remove: (id:string) => api.delete(`/media/${id}`, {params:{confirm:true}}),
+}
+export const libraryApi = {
+  awemes: (q='') => api.get<{items: import('@/types/crawler').Aweme[];total:number}>('/library/awemes',{params:{q}}),
+  detail: (id:string) => api.get(`/library/awemes/${id}`),
+  search: (q:string) => api.get('/library/search',{params:{q}}),
+}
+export const scheduleApi = {
+  list: () => api.get<{items: Record<string,unknown>[]}>('/schedules'),
+  create: (data:Record<string,unknown>) => api.post('/schedules',data),
+  update: (id:string,data:Record<string,unknown>) => api.put(`/schedules/${id}`,data),
+  run: (id:string) => api.post(`/schedules/${id}/run-now`),
+  remove: (id:string) => api.delete(`/schedules/${id}`),
+}
+export const systemApi = { health:()=>api.get('/system/health'), storage:()=>api.get('/system/storage') }
+
 export default api

@@ -86,8 +86,26 @@ class CrawlerStartRequest(BaseModel):
     asr_language: Optional[str] = None
     save_raw_payload: Optional[bool] = None
     keep_media: Optional[bool] = None
+    download_media: Optional[bool] = None
+    download_video: Optional[bool] = None
+    download_images: Optional[bool] = None
+    download_cover: Optional[bool] = None
+    download_music: Optional[bool] = None
+    media_quality: Optional[Literal["best_h264"]] = None
+    max_media_downloads: Optional[int] = Field(default=None, ge=0, le=MAX_API_LIMIT_COUNT)
+    max_media_total_bytes: Optional[int] = Field(default=None, ge=1)
+    media_library_max_bytes: Optional[int] = Field(default=None, ge=1)
+    min_free_disk_bytes: Optional[int] = Field(default=None, ge=0)
+    skip_existing_media: Optional[bool] = None
+    verify_media: Optional[bool] = None
+    keep_asr_source_media: Optional[bool] = None
+    incremental: Optional[bool] = None
+    stop_after_existing: Optional[int] = Field(default=None, ge=1, le=100)
+    refresh_existing_metrics: Optional[bool] = None
+    refresh_existing_comments: Optional[bool] = None
     enable_ip_proxy: bool = False
     static_proxy_url: str = ""
+    schedule_id: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_douyin_options(self):
@@ -100,6 +118,13 @@ class CrawlerStartRequest(BaseModel):
             self.topics.strip(), self.enable_creator_profile, self.force_creator_refresh,
             self.enable_native_subtitle, self.enable_asr, self.asr_model,
             self.asr_language, self.save_raw_payload, self.keep_media,
+            self.download_media, self.download_video, self.download_images,
+            self.download_cover, self.download_music, self.media_quality,
+            self.max_media_downloads, self.max_media_total_bytes,
+            self.media_library_max_bytes, self.min_free_disk_bytes,
+            self.skip_existing_media, self.verify_media, self.keep_asr_source_media,
+            self.incremental, self.stop_after_existing, self.refresh_existing_metrics,
+            self.refresh_existing_comments,
         )
         if self.platform != PlatformEnum.DOUYIN and any(value not in (None, "") for value in douyin_values):
             raise ValueError("Douyin-specific options require platform=dy")
@@ -115,6 +140,7 @@ class CrawlerStatusResponse(BaseModel):
     crawler_type: Optional[str] = None
     started_at: Optional[str] = None
     error_message: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 class LogEntry(BaseModel):

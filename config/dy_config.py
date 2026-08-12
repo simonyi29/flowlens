@@ -33,6 +33,25 @@ DY_ASR_LANGUAGE = "zh"
 DY_SAVE_RAW_PAYLOAD = False
 DY_KEEP_MEDIA = False
 
+# Permanent media library (independent from temporary ASR media).
+DY_DOWNLOAD_MEDIA = False
+DY_DOWNLOAD_VIDEO = True
+DY_DOWNLOAD_IMAGES = True
+DY_DOWNLOAD_COVER = True
+DY_DOWNLOAD_MUSIC = False
+DY_MEDIA_QUALITY = "best_h264"
+DY_MAX_MEDIA_DOWNLOADS = 15
+DY_MAX_MEDIA_TOTAL_BYTES = 5 * 1024 ** 3
+DY_MEDIA_LIBRARY_MAX_BYTES = 20 * 1024 ** 3
+DY_MIN_FREE_DISK_BYTES = 10 * 1024 ** 3
+DY_SKIP_EXISTING_MEDIA = True
+DY_VERIFY_MEDIA = True
+DY_KEEP_ASR_SOURCE_MEDIA = False
+DY_INCREMENTAL = False
+DY_STOP_AFTER_EXISTING = 5
+DY_REFRESH_EXISTING_METRICS = True
+DY_REFRESH_EXISTING_COMMENTS = False
+
 # Specify DY video URL list (supports multiple formats)
 # Supported formats:
 # 1. Full video URL: "https://www.douyin.com/video/7525538910311632128"

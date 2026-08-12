@@ -1,0 +1,55 @@
+import importlib.util
+import os
+import shutil
+import socket
+import sqlite3
+import httpx
+from pathlib import Path
+
+from fastapi import APIRouter
+
+from ..services.task_store import DB_PATH
+
+router = APIRouter(prefix="/system", tags=["system"])
+ROOT = Path(__file__).resolve().parents[2]
+MEDIA = ROOT / "data" / "douyin" / "media"
+
+
+def _directory_size(path: Path): return sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) if path.exists() else 0
+
+
+@router.get("/storage")
+async def storage():
+    MEDIA.mkdir(parents=True, exist_ok=True)
+    usage=shutil.disk_usage(MEDIA)
+    return {"media_bytes":_directory_size(MEDIA),"free_bytes":usage.free,"total_bytes":usage.total,"library_limit_bytes":20*1024**3,"min_free_bytes":10*1024**3}
+
+
+@router.get("/health")
+async def health():
+    cdp=False; login_state="unknown"; risk_state=None
+    try:
+        with socket.create_connection(("127.0.0.1",9222),timeout=.5): cdp=True
+    except OSError: pass
+    if cdp:
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                pages = (await client.get("http://127.0.0.1:9222/json")).json()
+            urls = " ".join(str(page.get("url") or "") for page in pages).lower()
+            if any(token in urls for token in ("captcha", "verify", "passport")):
+                risk_state = "captcha_required"
+            login_state = "login_page" if "login" in urls else "browser_available"
+        except (httpx.HTTPError, ValueError):
+            pass
+    fts=False
+    try:
+        with sqlite3.connect(":memory:") as db: db.execute("CREATE VIRTUAL TABLE x USING fts5(value)"); fts=True
+    except sqlite3.Error: pass
+    return {"status":"ok","checks":{
+        "cdp":{"ok":cdp,"detail":"127.0.0.1:9222","login_state":login_state,"risk_state":risk_state},
+        "faster_whisper":{"ok":importlib.util.find_spec("faster_whisper") is not None},
+        "ffprobe":{"ok":shutil.which("ffprobe") is not None},
+        "sqlite_fts5":{"ok":fts},
+        "media_writable":{"ok":MEDIA.exists() and os.access(MEDIA,os.W_OK)},
+        "task_database":{"ok":DB_PATH.parent.exists()},
+    }}

@@ -480,16 +480,20 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         sec_user_id: str,
         callback: Optional[Callable] = None,
         max_count: int = 0,
+        existing_checker: Optional[Callable[[str], Any]] = None,
+        stop_after_existing: int = 5,
     ):
         checkpoint_id = anonymize_user_id(sec_user_id)
         checkpoint = await load_checkpoint("creator_posts", checkpoint_id)
-        if checkpoint and checkpoint.status == "complete":
+        incremental = existing_checker is not None
+        if checkpoint and checkpoint.status == "complete" and not incremental:
             return []
         posts_has_more = 1
-        max_cursor = checkpoint.cursor if checkpoint else ""
-        collected = checkpoint.collected_count if checkpoint else 0
+        max_cursor = "" if incremental else (checkpoint.cursor if checkpoint else "")
+        collected = 0 if incremental else (checkpoint.collected_count if checkpoint else 0)
         result = []
         seen_aweme_ids: set[str] = set()
+        consecutive_existing = 0
         if max_count > 0 and collected >= max_count:
             return result
         try:
@@ -506,6 +510,14 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                         continue
                     seen_aweme_ids.add(aweme_id)
                     unique_awemes.append(aweme)
+                    if existing_checker:
+                        if await existing_checker(aweme_id):
+                            consecutive_existing += 1
+                        else:
+                            consecutive_existing = 0
+                        if consecutive_existing >= stop_after_existing:
+                            posts_has_more = 0
+                            break
                 if max_count > 0:
                     unique_awemes = unique_awemes[: max_count - collected]
                 utils.logger.info(

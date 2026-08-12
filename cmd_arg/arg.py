@@ -296,6 +296,23 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         keep_media: Annotated[
             str, typer.Option("--keep_media", help="Keep temporary Douyin ASR media")
         ] = str(getattr(config, "DY_KEEP_MEDIA", False)),
+        download_media: Annotated[str, typer.Option("--download_media")] = str(getattr(config, "DY_DOWNLOAD_MEDIA", False)),
+        download_video: Annotated[str, typer.Option("--download_video")] = str(getattr(config, "DY_DOWNLOAD_VIDEO", True)),
+        download_images: Annotated[str, typer.Option("--download_images")] = str(getattr(config, "DY_DOWNLOAD_IMAGES", True)),
+        download_cover: Annotated[str, typer.Option("--download_cover")] = str(getattr(config, "DY_DOWNLOAD_COVER", True)),
+        download_music: Annotated[str, typer.Option("--download_music")] = str(getattr(config, "DY_DOWNLOAD_MUSIC", False)),
+        media_quality: Annotated[str, typer.Option("--media_quality")] = getattr(config, "DY_MEDIA_QUALITY", "best_h264"),
+        max_media_downloads: Annotated[int, typer.Option("--max_media_downloads", min=0)] = getattr(config, "DY_MAX_MEDIA_DOWNLOADS", 15),
+        max_media_total_bytes: Annotated[int, typer.Option("--max_media_total_bytes", min=1)] = getattr(config, "DY_MAX_MEDIA_TOTAL_BYTES", 5 * 1024 ** 3),
+        media_library_max_bytes: Annotated[int, typer.Option("--media_library_max_bytes", min=1)] = getattr(config, "DY_MEDIA_LIBRARY_MAX_BYTES", 20 * 1024 ** 3),
+        min_free_disk_bytes: Annotated[int, typer.Option("--min_free_disk_bytes", min=0)] = getattr(config, "DY_MIN_FREE_DISK_BYTES", 10 * 1024 ** 3),
+        skip_existing_media: Annotated[str, typer.Option("--skip_existing_media")] = str(getattr(config, "DY_SKIP_EXISTING_MEDIA", True)),
+        verify_media: Annotated[str, typer.Option("--verify_media")] = str(getattr(config, "DY_VERIFY_MEDIA", True)),
+        keep_asr_source_media: Annotated[str, typer.Option("--keep_asr_source_media")] = str(getattr(config, "DY_KEEP_ASR_SOURCE_MEDIA", False)),
+        incremental: Annotated[str, typer.Option("--incremental")] = str(getattr(config, "DY_INCREMENTAL", False)),
+        stop_after_existing: Annotated[int, typer.Option("--stop_after_existing", min=1)] = getattr(config, "DY_STOP_AFTER_EXISTING", 5),
+        refresh_existing_metrics: Annotated[str, typer.Option("--refresh_existing_metrics")] = str(getattr(config, "DY_REFRESH_EXISTING_METRICS", True)),
+        refresh_existing_comments: Annotated[str, typer.Option("--refresh_existing_comments")] = str(getattr(config, "DY_REFRESH_EXISTING_COMMENTS", False)),
         max_comments_count_singlenotes: Annotated[
             Optional[int],
             typer.Option(
@@ -417,6 +434,23 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             config.DY_ASR_LANGUAGE = asr_language
             config.DY_SAVE_RAW_PAYLOAD = _to_bool(save_raw_payload)
             config.DY_KEEP_MEDIA = _to_bool(keep_media)
+            config.DY_DOWNLOAD_MEDIA = _to_bool(download_media)
+            config.DY_DOWNLOAD_VIDEO = _to_bool(download_video)
+            config.DY_DOWNLOAD_IMAGES = _to_bool(download_images)
+            config.DY_DOWNLOAD_COVER = _to_bool(download_cover)
+            config.DY_DOWNLOAD_MUSIC = _to_bool(download_music)
+            config.DY_MEDIA_QUALITY = media_quality
+            config.DY_MAX_MEDIA_DOWNLOADS = max_media_downloads
+            config.DY_MAX_MEDIA_TOTAL_BYTES = max_media_total_bytes
+            config.DY_MEDIA_LIBRARY_MAX_BYTES = media_library_max_bytes
+            config.DY_MIN_FREE_DISK_BYTES = min_free_disk_bytes
+            config.DY_SKIP_EXISTING_MEDIA = _to_bool(skip_existing_media)
+            config.DY_VERIFY_MEDIA = _to_bool(verify_media)
+            config.DY_KEEP_ASR_SOURCE_MEDIA = _to_bool(keep_asr_source_media)
+            config.DY_INCREMENTAL = _to_bool(incremental)
+            config.DY_STOP_AFTER_EXISTING = stop_after_existing
+            config.DY_REFRESH_EXISTING_METRICS = _to_bool(refresh_existing_metrics)
+            config.DY_REFRESH_EXISTING_COMMENTS = _to_bool(refresh_existing_comments)
 
         # Set platform-specific ID lists for detail/creator mode
         if specified_id_list:

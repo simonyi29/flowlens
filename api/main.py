@@ -32,7 +32,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import crawler_router, data_router, websocket_router
+from .routers import crawler_router, data_router, websocket_router, tasks_router, media_router, schedules_router, library_router, system_router
+from .services.task_store import task_store
+from .services.schedule_runner import schedule_runner
+from .services.crawler_manager import crawler_manager
 
 # Project root directory (used for running subprocesses like uv run main.py)
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -40,7 +43,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 app = FastAPI(
     title="FlowLens WebUI API",
     description="API for controlling FlowLens from WebUI",
-    version="1.0.0"
+    version="1.1.0"
 )
 
 # Get webui static files directory
@@ -64,6 +67,23 @@ app.add_middleware(
 app.include_router(crawler_router, prefix="/api")
 app.include_router(data_router, prefix="/api")
 app.include_router(websocket_router, prefix="/api")
+app.include_router(tasks_router, prefix="/api")
+app.include_router(media_router, prefix="/api")
+app.include_router(schedules_router, prefix="/api")
+app.include_router(library_router, prefix="/api")
+app.include_router(system_router, prefix="/api")
+
+
+@app.on_event("startup")
+async def initialize_task_store():
+    await task_store.initialize()
+    await crawler_manager.start_next_queued()
+    schedule_runner.start()
+
+
+@app.on_event("shutdown")
+async def stop_schedule_runner():
+    await schedule_runner.stop()
 
 
 @app.get("/")
@@ -74,7 +94,7 @@ async def serve_frontend():
         return FileResponse(index_path)
     return {
         "message": "FlowLens WebUI API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "docs": "/docs",
         "note": "WebUI not found, please build it first: cd webui && npm run build"
     }
@@ -96,7 +116,7 @@ async def check_environment():
             process = await loop.run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    ["uv", "run", "main.py", "--help"],
+                    [sys.executable, "main.py", "--help"],
                     capture_output=True,
                     timeout=30.0,
                     cwd=str(PROJECT_ROOT)
@@ -105,7 +125,7 @@ async def check_environment():
             stdout, stderr = process.stdout, process.stderr  # bytes
         else:
             process = await asyncio.create_subprocess_exec(
-                "uv", "run", "main.py", "--help",
+                sys.executable, "main.py", "--help",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=str(PROJECT_ROOT)  # Project root directory

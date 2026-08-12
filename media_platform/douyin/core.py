@@ -18,10 +18,12 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 import asyncio
+import json
 import os
 import random
 import uuid
 from asyncio import Task
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import (
@@ -60,6 +62,8 @@ from .help import (
 from .normalizer import optional_int, sanitize_raw_payload
 from .transcript import DouyinTranscriptService
 from .login import DouYinLogin
+from .media_downloader import PermanentMediaDownloader, MediaDownloadError, video_candidates
+from api.services.task_store import task_store
 
 
 class DouYinCrawler(AbstractCrawler):
@@ -82,9 +86,20 @@ class DouYinCrawler(AbstractCrawler):
         self.seen_aweme_ids: set[str] = set()
         self.seen_creator_ids: set[str] = set()
         self.transcript_service: Optional[DouyinTranscriptService] = None
+        self.media_downloader: Optional[PermanentMediaDownloader] = None
+        self.media_queue: Optional[asyncio.Queue] = None
+        self.media_worker: Optional[asyncio.Task] = None
+        self.media_worker_error: Optional[Exception] = None
+        self.media_downloaded_awemes = 0
+        self.new_aweme_ids: set[str] = set()
 
     async def start(self) -> None:
-        crawl_run_id_var.set(uuid.uuid4().hex)
+        crawl_run_id_var.set(os.getenv("FLOWLENS_RUN_ID") or uuid.uuid4().hex)
+        await task_store.initialize()
+        await task_store.ensure_run(
+            crawl_run_id_var.get(),
+            {"platform": "dy", "crawler_type": config.CRAWLER_TYPE, "source": "cli"},
+        )
         source_keyword_var.set("")
         source_topic_var.set("")
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -117,9 +132,23 @@ class DouYinCrawler(AbstractCrawler):
                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
 
             self.context_page = await self.browser_context.new_page()
-            await self.context_page.goto(self.index_url)
+            # Douyin keeps advertising/analytics requests alive; waiting for the
+            # full load event makes a healthy CDP session look unavailable.
+            await self.context_page.goto(
+                self.index_url, wait_until="domcontentloaded", timeout=45_000
+            )
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
+            if getattr(config, "DY_DOWNLOAD_MEDIA", False):
+                media_headers = {
+                    key: value for key, value in self.dy_client.headers.items()
+                    if key.lower() not in {"host", "content-type", "origin"}
+                }
+                self.media_downloader = PermanentMediaDownloader(
+                    headers=media_headers, proxy=httpx_proxy_format,
+                )
+                self.media_queue = asyncio.Queue(maxsize=3)
+                self.media_worker = asyncio.create_task(self._media_worker_loop())
             if getattr(config, "DY_ENABLE_NATIVE_SUBTITLE", True) or getattr(config, "DY_ENABLE_ASR", True):
                 self.transcript_service = DouyinTranscriptService(self.dy_client.get_aweme_media)
                 await self.transcript_service.start()
@@ -146,13 +175,37 @@ class DouYinCrawler(AbstractCrawler):
                     await self.get_creators_and_videos()
                 elif config.CRAWLER_TYPE == "topic":
                     await self.search_topics()
+                await self._drain_media_queue()
             except asyncio.CancelledError:
+                await self._cancel_media_queue()
                 if self.transcript_service:
                     await self.transcript_service.cancel_and_close()
+                await task_store.update_run(
+                    crawl_run_id_var.get(), "partial", stage="finalize",
+                    error_type="cancelled", error_message="crawler cancelled",
+                )
+                raise
+            except Exception as exc:
+                await self._cancel_media_queue()
+                await task_store.update_run(
+                    crawl_run_id_var.get(), "partial", stage="finalize",
+                    error_type=getattr(exc, "error_type", "unknown"),
+                    error_message=str(exc),
+                )
                 raise
             else:
                 if self.transcript_service:
                     await self.transcript_service.drain_and_close()
+                await task_store.update_stage(
+                    crawl_run_id_var.get(), "finalize", "completed",
+                    total=1, completed=1, failed=0,
+                )
+                await task_store.update_run(
+                    crawl_run_id_var.get(), "completed", stage="finalize"
+                )
+            finally:
+                if self.media_downloader:
+                    await self.media_downloader.close()
 
             utils.logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
 
@@ -270,8 +323,9 @@ class DouYinCrawler(AbstractCrawler):
                 successful_ids: List[str] = []
                 for detail in details:
                     if detail:
-                        await self.process_aweme_detail(detail)
-                        successful_ids.append(str(detail.get("aweme_id") or ""))
+                        is_new = await self.process_aweme_detail(detail)
+                        if is_new is not False or getattr(config, "DY_REFRESH_EXISTING_COMMENTS", False):
+                            successful_ids.append(str(detail.get("aweme_id") or ""))
 
                 await self.batch_get_note_comments([item for item in successful_ids if item])
                 page += 1
@@ -290,15 +344,144 @@ class DouYinCrawler(AbstractCrawler):
                 utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
             utils.logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
 
-    async def process_aweme_detail(self, aweme_item: Dict) -> None:
+    async def process_aweme_detail(self, aweme_item: Dict) -> bool:
         """Persist one full detail response and its related public creator data."""
+        aweme_id = str(aweme_item.get("aweme_id") or "")
+        run_id = crawl_run_id_var.get()
+        await task_store.upsert_task_item(run_id, aweme_id, "detail", "running", 0.1)
+        existed = await task_store.entity_exists("dy", "aweme", aweme_id)
         await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
-        await self.get_aweme_media(aweme_item=aweme_item)
+        await task_store.touch_entity("dy", "aweme", aweme_id, run_id)
+        await task_store.upsert_task_item(run_id, aweme_id, "detail", "completed", 1)
+        if existed and getattr(config, "DY_INCREMENTAL", False):
+            return False
+        self.new_aweme_ids.add(aweme_id)
+        if getattr(config, "DY_DOWNLOAD_MEDIA", False):
+            if self.media_queue:
+                await self.media_queue.put(aweme_item)
+        else:
+            await self.get_aweme_media(aweme_item=aweme_item)
         if self.transcript_service:
             await self.transcript_service.enqueue(aweme_item)
         author = aweme_item.get("author") or {}
         sec_user_id = str(author.get("sec_uid") or "")
         await self.fetch_creator_profile(sec_user_id)
+        return True
+
+    async def _media_worker_loop(self) -> None:
+        assert self.media_queue is not None
+        while True:
+            item = await self.media_queue.get()
+            try:
+                if item is None:
+                    return
+                await self.download_permanent_media(item)
+            except Exception as exc:
+                self.media_worker_error = exc
+            finally:
+                self.media_queue.task_done()
+
+    async def _drain_media_queue(self) -> None:
+        if not self.media_queue or not self.media_worker:
+            return
+        await self.media_queue.put(None)
+        await self.media_queue.join()
+        await self.media_worker
+        if self.media_worker_error:
+            raise self.media_worker_error
+
+    async def _cancel_media_queue(self) -> None:
+        if self.media_worker and not self.media_worker.done():
+            self.media_worker.cancel()
+            await asyncio.gather(self.media_worker, return_exceptions=True)
+
+    async def download_permanent_media(self, aweme_item: Dict) -> None:
+        if not self.media_downloader:
+            return
+        aweme_id = str(aweme_item.get("aweme_id") or "")
+        author = aweme_item.get("author") or {}
+        creator_hash = anonymize_user_id(str(author.get("uid") or author.get("sec_uid") or "")) or "unknown"
+        base = self.media_downloader.root / creator_hash / aweme_id
+        assets: list[tuple[str, list[str], str]] = []
+        if getattr(config, "DY_DOWNLOAD_VIDEO", True) and not (aweme_item.get("images") or []):
+            assets.append(("video", video_candidates(aweme_item), "video.mp4"))
+        if getattr(config, "DY_DOWNLOAD_IMAGES", True):
+            for index, image in enumerate(aweme_item.get("images") or []):
+                assets.append(("image", list((image or {}).get("url_list") or []), f"images/{index:03d}.jpeg"))
+        if getattr(config, "DY_DOWNLOAD_COVER", True):
+            cover = ((aweme_item.get("video") or {}).get("origin_cover") or {}).get("url_list") or []
+            if cover: assets.append(("cover", list(cover), "cover.jpg"))
+        if getattr(config, "DY_DOWNLOAD_MUSIC", False):
+            music = (((aweme_item.get("music") or {}).get("play_url") or {}).get("url_list") or [])
+            if music: assets.append(("music", list(music), "music.mp3"))
+        if not assets:
+            return
+        if self.media_downloaded_awemes >= int(config.DY_MAX_MEDIA_DOWNLOADS):
+            await task_store.upsert_task_item(
+                crawl_run_id_var.get(), aweme_id, "media_download", "quota_reached", 0
+            )
+            return
+        self.media_downloaded_awemes += 1
+        metadata = {
+            "aweme_id": aweme_id, "creator_hash": creator_hash,
+            "title": str(aweme_item.get("desc") or ""),
+            "duration_ms": aweme_item.get("duration") or (aweme_item.get("video") or {}).get("duration"),
+            "crawl_run_id": crawl_run_id_var.get(), "assets": [],
+        }
+        for kind, urls, relative in assets:
+            if not urls: continue
+            try:
+                await task_store.upsert_task_item(crawl_run_id_var.get(), aweme_id, "media_download", "running", 0.1)
+                result = await self.media_downloader.download(urls, base / relative, verify=bool(config.DY_VERIFY_MEDIA))
+                await task_store.upsert_media({
+                    "run_id": crawl_run_id_var.get(), "aweme_id": aweme_id, "creator_hash": creator_hash,
+                    "kind": kind, "status": "completed", "path": str(result.path.resolve()),
+                    "source_url": result.source_url, "mime_type": result.mime_type,
+                    "size_bytes": result.size_bytes, "sha256": result.sha256, "quality": config.DY_MEDIA_QUALITY,
+                })
+                metadata["assets"].append({"kind":kind,"path":str(result.path.relative_to(base)),"size_bytes":result.size_bytes,"sha256":result.sha256})
+                await task_store.upsert_task_item(crawl_run_id_var.get(), aweme_id, "media_download", "completed", 1)
+            except MediaDownloadError as exc:
+                # Signed CDN addresses can expire between detail discovery and the
+                # background download. Refresh once, then rebuild this asset's URLs.
+                if exc.error_type == "media_url_expired":
+                    try:
+                        refreshed = await self.dy_client.get_video_by_id(aweme_id)
+                        if kind == "video":
+                            refreshed_urls = video_candidates(refreshed)
+                        elif kind == "cover":
+                            refreshed_urls = list((((refreshed.get("video") or {}).get("origin_cover") or {}).get("url_list") or []))
+                        elif kind == "music":
+                            refreshed_urls = list(((((refreshed.get("music") or {}).get("play_url") or {}).get("url_list")) or []))
+                        else:
+                            image_index = int(Path(relative).stem)
+                            refreshed_images = refreshed.get("images") or []
+                            refreshed_urls = list((refreshed_images[image_index] or {}).get("url_list") or []) if image_index < len(refreshed_images) else []
+                        if refreshed_urls:
+                            result = await self.media_downloader.download(refreshed_urls, base / relative, verify=bool(config.DY_VERIFY_MEDIA))
+                            await task_store.upsert_media({
+                                "run_id": crawl_run_id_var.get(), "aweme_id": aweme_id, "creator_hash": creator_hash,
+                                "kind": kind, "status": "completed", "path": str(result.path.resolve()),
+                                "source_url": result.source_url, "mime_type": result.mime_type,
+                                "size_bytes": result.size_bytes, "sha256": result.sha256, "quality": config.DY_MEDIA_QUALITY,
+                                "retry_count": 1,
+                            })
+                            metadata["assets"].append({"kind":kind,"path":str(result.path.relative_to(base)),"size_bytes":result.size_bytes,"sha256":result.sha256})
+                            await task_store.upsert_task_item(crawl_run_id_var.get(), aweme_id, "media_download", "completed", 1)
+                            continue
+                    except Exception as refresh_exc:
+                        utils.logger.warning(f"[DouYinCrawler.download] media_url_expired refresh failed: {refresh_exc}")
+                await task_store.upsert_media({"run_id": crawl_run_id_var.get(), "aweme_id": aweme_id,
+                    "creator_hash": creator_hash, "kind": kind, "status": "waiting_for_space" if exc.error_type.startswith("disk_") else "failed",
+                    "part_path": str((base / relative).with_suffix(Path(relative).suffix + '.part').resolve()),
+                    "error_type": exc.error_type, "error_message": str(exc)})
+                await task_store.upsert_task_item(crawl_run_id_var.get(), aweme_id, "media_download",
+                    "waiting_for_space" if exc.error_type.startswith("disk_") else "failed", 0,
+                    exc.error_type, str(exc))
+                if exc.error_type.startswith("disk_"):
+                    raise
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
     async def fetch_creator_profile(self, sec_user_id: str) -> None:
         if not getattr(config, "DY_ENABLE_CREATOR_PROFILE", True):
@@ -386,6 +569,7 @@ class DouYinCrawler(AbstractCrawler):
             cursor = int(checkpoint.cursor) if checkpoint and checkpoint.status != "complete" else 0
             collected = checkpoint.collected_count if checkpoint and checkpoint.status != "complete" else 0
             max_count = config.CRAWLER_MAX_NOTES_COUNT
+            consecutive_existing = 0
             while collected < max_count:
                 try:
                     response = await self.dy_client.get_topic_awemes(
@@ -413,8 +597,13 @@ class DouYinCrawler(AbstractCrawler):
                         continue
                     self.seen_aweme_ids.add(aweme_id)
                     page_ids.append(aweme_id)
+                    if getattr(config, "DY_INCREMENTAL", False):
+                        if await task_store.entity_exists("dy", "aweme", aweme_id):
+                            consecutive_existing += 1
+                        else:
+                            consecutive_existing = 0
                     collected += 1
-                    if collected >= max_count:
+                    if collected >= max_count or consecutive_existing >= int(getattr(config, "DY_STOP_AFTER_EXISTING", 5)):
                         break
                 semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                 details = await asyncio.gather(
@@ -423,8 +612,9 @@ class DouYinCrawler(AbstractCrawler):
                 successful = []
                 for item in details:
                     if item:
-                        await self.process_aweme_detail(item)
-                        successful.append(str(item.get("aweme_id") or ""))
+                        is_new = await self.process_aweme_detail(item)
+                        if is_new is not False or getattr(config, "DY_REFRESH_EXISTING_COMMENTS", False):
+                            successful.append(str(item.get("aweme_id") or ""))
                 await self.batch_get_note_comments([item for item in successful if item])
                 has_more = bool(response.get("has_more"))
                 next_cursor = int(response.get("cursor") or response.get("max_cursor") or cursor)
@@ -436,7 +626,7 @@ class DouYinCrawler(AbstractCrawler):
                         updated_at=utils.get_current_timestamp(),
                     )
                 )
-                if status == "complete" or not awemes or next_cursor == cursor:
+                if status == "complete" or not awemes or next_cursor == cursor or consecutive_existing >= int(getattr(config, "DY_STOP_AFTER_EXISTING", 5)):
                     break
                 cursor = next_cursor
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
@@ -471,10 +661,13 @@ class DouYinCrawler(AbstractCrawler):
         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
         task_list = [self.get_aweme_detail(aweme_id=aweme_id, semaphore=semaphore) for aweme_id in aweme_id_list]
         aweme_details = await asyncio.gather(*task_list)
+        comment_ids = []
         for aweme_detail in aweme_details:
             if aweme_detail is not None:
-                await self.process_aweme_detail(aweme_detail)
-        await self.batch_get_note_comments(aweme_id_list)
+                is_new = await self.process_aweme_detail(aweme_detail)
+                if is_new is not False or getattr(config, "DY_REFRESH_EXISTING_COMMENTS", False):
+                    comment_ids.append(str(aweme_detail.get("aweme_id") or ""))
+        await self.batch_get_note_comments(comment_ids)
 
     async def get_aweme_detail(self, aweme_id: str, semaphore: asyncio.Semaphore) -> Any:
         """Get note detail"""
@@ -554,9 +747,19 @@ class DouYinCrawler(AbstractCrawler):
                 sec_user_id=user_id,
                 callback=self.fetch_creator_video_detail,
                 max_count=config.CRAWLER_MAX_NOTES_COUNT,
+                existing_checker=(
+                    (lambda aweme_id: task_store.entity_exists("dy", "aweme", aweme_id))
+                    if getattr(config, "DY_INCREMENTAL", False) else None
+                ),
+                stop_after_existing=int(getattr(config, "DY_STOP_AFTER_EXISTING", 5)),
             )
 
-            video_ids = [video_item.get("aweme_id") for video_item in all_video_list]
+            video_ids = [
+                video_item.get("aweme_id") for video_item in all_video_list
+                if not getattr(config, "DY_INCREMENTAL", False)
+                or str(video_item.get("aweme_id") or "") in self.new_aweme_ids
+                or getattr(config, "DY_REFRESH_EXISTING_COMMENTS", False)
+            ]
             await self.batch_get_note_comments(video_ids)
 
     async def fetch_creator_video_detail(self, video_list: List[Dict]):

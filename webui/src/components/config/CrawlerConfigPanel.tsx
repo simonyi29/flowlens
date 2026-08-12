@@ -162,6 +162,24 @@ export function CrawlerConfigPanel() {
       asr_language: _asrLanguage,
       save_raw_payload: _rawPayload,
       keep_media: _keepMedia,
+      download_media: _downloadMedia,
+      download_video: _downloadVideo,
+      download_images: _downloadImages,
+      download_cover: _downloadCover,
+      download_music: _downloadMusic,
+      media_quality: _mediaQuality,
+      max_media_downloads: _maxMediaDownloads,
+      max_media_total_bytes: _maxMediaTotalBytes,
+      media_library_max_bytes: _mediaLibraryMaxBytes,
+      min_free_disk_bytes: _minFreeDiskBytes,
+      skip_existing_media: _skipExistingMedia,
+      verify_media: _verifyMedia,
+      keep_asr_source_media: _keepAsrSourceMedia,
+      incremental: _incremental,
+      stop_after_existing: _stopAfterExisting,
+      refresh_existing_metrics: _refreshExistingMetrics,
+      refresh_existing_comments: _refreshExistingComments,
+      schedule_id: _scheduleId,
       ...commonConfig
     } = config
     startCrawler(commonConfig as typeof config)
@@ -441,6 +459,21 @@ export function CrawlerConfigPanel() {
               <Input value={config.asr_language} onChange={(e) => updateConfig({ asr_language: e.target.value })}
                 disabled={isDisabled || !config.enable_asr} className="h-9 text-xs" />
             </Field>
+            <Field label="正式媒体最大作品数">
+              <Input type="number" min={0} value={config.max_media_downloads}
+                onChange={(e) => updateConfig({ max_media_downloads: Math.max(0, Number(e.target.value) || 0) })}
+                disabled={isDisabled || !config.download_media} className="h-9 text-xs" />
+            </Field>
+            <Field label="单任务媒体配额（GB）">
+              <Input type="number" min={1} value={Math.round(config.max_media_total_bytes / 1073741824)}
+                onChange={(e) => updateConfig({ max_media_total_bytes: Math.max(1, Number(e.target.value) || 1) * 1073741824 })}
+                disabled={isDisabled || !config.download_media} className="h-9 text-xs" />
+            </Field>
+            <Field label="连续旧作品停止数">
+              <Input type="number" min={1} value={config.stop_after_existing}
+                onChange={(e) => updateConfig({ stop_after_existing: Math.max(1, Number(e.target.value) || 5) })}
+                disabled={isDisabled || !config.incremental} className="h-9 text-xs" />
+            </Field>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
             {[
@@ -450,6 +483,17 @@ export function CrawlerConfigPanel() {
               ['enable_asr', t('field.localAsr')],
               ['save_raw_payload', t('field.rawPayload')],
               ['keep_media', t('field.keepMedia')],
+              ['download_media', '永久下载媒体'],
+              ['download_video', '下载视频'],
+              ['download_images', '下载图文图片'],
+              ['download_cover', '下载封面'],
+              ['download_music', '下载音乐'],
+              ['verify_media', '校验媒体完整性'],
+              ['skip_existing_media', '跳过已有媒体'],
+              ['keep_asr_source_media', '保留 ASR 源媒体'],
+              ['incremental', '增量采集'],
+              ['refresh_existing_metrics', '刷新旧作品指标'],
+              ['refresh_existing_comments', '刷新旧作品评论'],
             ].map(([key, label]) => (
               <div key={key} className="flex items-center gap-3 rounded-lg border border-cyber-border-subtle bg-cyber-bg-tertiary/30 p-2.5">
                 <Checkbox checked={Boolean(config[key as keyof typeof config])}

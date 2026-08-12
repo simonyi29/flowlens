@@ -22,8 +22,26 @@ export interface CrawlerConfig {
   asr_language: string
   save_raw_payload: boolean
   keep_media: boolean
+  download_media: boolean
+  download_video: boolean
+  download_images: boolean
+  download_cover: boolean
+  download_music: boolean
+  media_quality: 'best_h264'
+  max_media_downloads: number
+  max_media_total_bytes: number
+  media_library_max_bytes: number
+  min_free_disk_bytes: number
+  skip_existing_media: boolean
+  verify_media: boolean
+  keep_asr_source_media: boolean
+  incremental: boolean
+  stop_after_existing: number
+  refresh_existing_metrics: boolean
+  refresh_existing_comments: boolean
   enable_ip_proxy: boolean
   static_proxy_url: string
+  schedule_id?: string | null
 }
 
 export interface CrawlerStatus {
@@ -32,7 +50,12 @@ export interface CrawlerStatus {
   crawler_type: string | null
   started_at: string | null
   error_message: string | null
+  run_id?: string | null
 }
+
+export interface TaskRun { run_id:string; platform:string; crawler_type:string; status:string; stage:string; created_at:string; error_message?:string }
+export interface MediaAsset { asset_id:string; aweme_id:string; kind:string; status:string; path?:string; size_bytes:number; mime_type?:string }
+export interface Aweme { aweme_id:string; title:string; desc:string; nickname:string; liked_count?:number; comment_count?:number; source_topic?:string; collected_at:number }
 
 export interface LogEntry {
   id: number

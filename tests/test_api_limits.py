@@ -4,6 +4,7 @@ import config
 import asyncio
 import os
 import signal
+import sys
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 from cmd_arg import parse_cmd
@@ -42,6 +43,7 @@ def test_crawler_manager_build_command():
         max_comments_count=None
     )
     cmd1 = cm._build_command(req1)
+    assert cmd1[:2] == [sys.executable, "main.py"]
     # Check that the custom arguments are NOT present
     assert "--crawler_max_notes_count" not in cmd1
     assert "--max_comments_count_singlenotes" not in cmd1
@@ -68,7 +70,7 @@ def test_crawler_manager_build_command():
 def test_api_start_crawler_with_limits():
     client = TestClient(app)
 
-    with patch("api.routers.crawler.crawler_manager.start", new_callable=AsyncMock) as mock_start:
+    with patch("api.routers.crawler.crawler_manager.enqueue", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = True
 
         # Test case 1: with limits
@@ -82,7 +84,10 @@ def test_api_start_crawler_with_limits():
         })
 
         assert response.status_code == 200
-        assert response.json() == {"status": "ok", "message": "Crawler started successfully"}
+        assert response.json() == {
+            "status": "ok", "message": "Crawler queued successfully",
+            "run_id": True, "task_status": "queued",
+        }
 
         mock_start.assert_called_once()
         called_request = mock_start.call_args[0][0]
@@ -93,7 +98,7 @@ def test_api_start_crawler_with_limits():
 def test_api_start_crawler_without_limits():
     client = TestClient(app)
 
-    with patch("api.routers.crawler.crawler_manager.start", new_callable=AsyncMock) as mock_start:
+    with patch("api.routers.crawler.crawler_manager.enqueue", new_callable=AsyncMock) as mock_start:
         mock_start.return_value = True
 
         # Test case 2: without limits

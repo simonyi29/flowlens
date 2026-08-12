@@ -20,6 +20,27 @@ FlowLens（流镜）以抖音公开数据采集为主要增强方向，支持关
 - 提供 CLI、FastAPI 和 WebUI 配置界面。
 - 原始响应默认关闭；开启后递归移除可识别个人的信息。
 - 默认关闭代理，仅保留项目已有的静态代理配置。
+- FlowLens 1.1 增加持久任务中心、正式媒体下载、增量采集、定时计划、内容库和系统健康检查。
+
+## FlowLens 1.1
+
+正式媒体下载默认关闭，与 ASR 临时媒体完全独立。开启后默认最多下载 15 个作品、单任务最多新增 5GB、媒体库上限 20GB，并在磁盘剩余不足 10GB 时暂停。视频优先使用最高可用 H.264，支持多 CDN 回退、`.part` 续传、SHA-256 和可选 `ffprobe` 校验。
+
+```shell
+uv run main.py --platform dy --type search --keywords "人工智能" \
+  --crawler_max_notes_count 30 --download_media true \
+  --max_media_downloads 5 --max_media_total_bytes 5368709120
+```
+
+API 启动后可使用：
+
+- `/api/tasks`：持久任务历史、暂停、恢复、取消和失败重试。
+- `/api/media`：媒体清单、本地 Range 播放和确认删除。
+- `/api/schedules`：账号/话题的 once、hourly、daily 计划。
+- `/api/library`：内容分页、详情、评论树、字幕、指标趋势、搜索与导出。
+- `/api/system/health`：CDP、ASR、ffprobe、FTS5 和媒体目录检查。
+
+任务和计划状态固定保存到 `data/flowlens/tasks.sqlite`。任务配置快照不会保存 Cookie 或带凭据的静态代理地址。定时器仅在 FlowLens API/WebUI 进程运行期间工作，错过多次时下次启动只补执行一次。
 
 ## 使用边界
 

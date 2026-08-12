@@ -265,7 +265,8 @@ class DouyinTranscriptService:
                 getattr(config, "DY_ASR_MODEL", "small"),
             )
         finally:
-            if temp_path and temp_path.exists() and not getattr(config, "DY_KEEP_MEDIA", False):
+            keep_source = getattr(config, "DY_KEEP_ASR_SOURCE_MEDIA", getattr(config, "DY_KEEP_MEDIA", False))
+            if temp_path and temp_path.exists() and not keep_source:
                 temp_path.unlink(missing_ok=True)
 
     def _transcribe(self, media_path: Path) -> list[DouyinTranscriptSegment]:
