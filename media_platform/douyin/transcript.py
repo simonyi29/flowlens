@@ -216,12 +216,16 @@ class DouyinTranscriptService:
                 )
             )
             return
-        video_url = self._video_url(aweme)
-        if not video_url:
+        video_urls = self._video_urls(aweme)
+        if not video_urls:
             raise RuntimeError("video download URL is unavailable")
-        media = await self.downloader(video_url)
+        media = None
+        for video_url in video_urls:
+            media = await self.downloader(video_url)
+            if media:
+                break
         if not media:
-            raise RuntimeError("video download failed")
+            raise RuntimeError(f"video download failed for {len(video_urls)} candidate URLs")
 
         temp_path = None
         try:
@@ -310,10 +314,13 @@ class DouyinTranscriptService:
         )
 
     @staticmethod
-    def _video_url(aweme: dict[str, Any]) -> str:
+    def _video_urls(aweme: dict[str, Any]) -> list[str]:
         video = aweme.get("video") or {}
+        result = []
         for key in ("play_addr_h264", "play_addr_256", "play_addr"):
             urls = (video.get(key) or {}).get("url_list") or []
-            if urls:
-                return str(urls[-1])
-        return ""
+            for url in urls:
+                value = str(url or "")
+                if value and value not in result:
+                    result.append(value)
+        return result

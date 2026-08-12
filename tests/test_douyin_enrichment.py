@@ -777,6 +777,51 @@ def test_asr_empty_audio_result_is_saved_as_retryable_failure(monkeypatch, tmp_p
     assert not list((tmp_path / "data/douyin/tmp").glob("*.mp4"))
 
 
+def test_asr_media_download_tries_all_cdn_candidates(monkeypatch, tmp_path):
+    import media_platform.douyin.transcript as transcript_module
+
+    attempted = []
+    saved = []
+
+    async def downloader(url):
+        attempted.append(url)
+        return b"video" if url == "working-url" else None
+
+    async def save_transcript(item):
+        saved.append(item)
+
+    async def ignore_checkpoint(*_args):
+        return None
+
+    async def scenario():
+        service = DouyinTranscriptService(downloader)
+        monkeypatch.setattr(service, "_transcribe", lambda _path: [
+            transcript_module.DouyinTranscriptSegment(
+                start_ms=0, end_ms=1000, text="成功"
+            )
+        ])
+        await service.enqueue({
+            "aweme_id": "cdn-fallback",
+            "video": {
+                "play_addr_h264": {"url_list": ["broken-url", "working-url"]},
+                "play_addr": {"url_list": ["working-url", "unused-url"]},
+            },
+        })
+        await service.drain_and_close()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "DY_ENABLE_NATIVE_SUBTITLE", False)
+    monkeypatch.setattr(config, "DY_ENABLE_ASR", True)
+    monkeypatch.setattr(config, "DY_KEEP_MEDIA", False)
+    monkeypatch.setattr(transcript_module.douyin_store, "save_transcript", save_transcript)
+    monkeypatch.setattr(transcript_module, "load_checkpoint", ignore_checkpoint)
+    monkeypatch.setattr(transcript_module, "save_checkpoint", ignore_checkpoint)
+    asyncio.run(scenario())
+
+    assert attempted == ["broken-url", "working-url"]
+    assert saved[-1].status == "asr_completed"
+
+
 def test_transcript_cancel_marks_active_and_queued_jobs_retryable(monkeypatch):
     import media_platform.douyin.transcript as transcript_module
 
