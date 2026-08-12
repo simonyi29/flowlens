@@ -215,6 +215,20 @@ class DouYinCrawler(AbstractCrawler):
                         await asyncio.sleep(2 ** attempt)
                 if posts_res is None:
                     break
+                if "data" not in posts_res:
+                    error = "search response is missing data; login may have expired or risk control may be active"
+                    utils.logger.error(
+                        f"[DouYinCrawler.search] keyword {keyword}: {error}"
+                    )
+                    await save_checkpoint(
+                        DouyinCrawlCheckpoint(
+                            scope="search", scope_id=keyword, cursor=str(page),
+                            status="partial" if collected else "failed",
+                            collected_count=collected, last_error=error,
+                            updated_at=utils.get_current_timestamp(),
+                        )
+                    )
+                    break
                 if not posts_res.get("data"):
                     utils.logger.info(
                         f"[DouYinCrawler.search] keyword {keyword}, page {page} is empty"
@@ -229,9 +243,6 @@ class DouYinCrawler(AbstractCrawler):
                             updated_at=utils.get_current_timestamp(),
                         )
                     )
-                    break
-                if "data" not in posts_res:
-                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed，账号也许被风控了。")
                     break
                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
                 page_aweme_list: List[str] = []

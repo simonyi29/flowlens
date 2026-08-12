@@ -1,13 +1,16 @@
 import asyncio
+import json
+from contextlib import asynccontextmanager
 import pytest
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 import config
 from database import douyin_state
 from database.douyin_migrations import migrate_douyin_sqlite
-from database.models import Base
+from database.models import Base, DouyinAweme, DouyinAwemeMetricSnapshot
 from media_platform.douyin.normalizer import (
     normalize_aweme,
     optional_int,
@@ -221,6 +224,151 @@ def test_checkpoint_list_is_recent_first_and_bounded(monkeypatch, tmp_path):
     ]
 
 
+def test_creator_profile_uses_fresh_cache_unless_forced(monkeypatch):
+    import media_platform.douyin.core as core_module
+    from model.m_douyin import DouyinCrawlCheckpoint
+
+    now = 2_000_000
+    raw_creator_id = "creator-sensitive"
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_user_info(self, sec_user_id):
+            assert sec_user_id == raw_creator_id
+            self.calls += 1
+            return {"user": {"uid": raw_creator_id, "nickname": "测试账号"}}
+
+    async def fresh_checkpoint(_scope, scope_id):
+        assert scope_id == anonymize_user_id(raw_creator_id)
+        return DouyinCrawlCheckpoint(
+            scope="creator_profile", scope_id=scope_id, status="complete",
+            updated_at=now - 1_000,
+        )
+
+    saved_creators = []
+
+    async def save_creator(_user_id, payload):
+        saved_creators.append(payload)
+
+    async def ignore_checkpoint(_item):
+        return None
+
+    monkeypatch.setattr(config, "DY_ENABLE_CREATOR_PROFILE", True)
+    monkeypatch.setattr(config, "DY_CREATOR_REFRESH_INTERVAL_SEC", 86400)
+    monkeypatch.setattr(config, "DY_FORCE_CREATOR_REFRESH", False)
+    monkeypatch.setattr(core_module, "load_checkpoint", fresh_checkpoint)
+    monkeypatch.setattr(core_module, "save_checkpoint", ignore_checkpoint)
+    monkeypatch.setattr(core_module.douyin_store, "save_creator", save_creator)
+    monkeypatch.setattr(core_module.utils, "get_current_timestamp", lambda: now)
+
+    cached = DouYinCrawler()
+    cached.dy_client = FakeClient()
+    asyncio.run(cached.fetch_creator_profile(raw_creator_id))
+    assert cached.dy_client.calls == 0
+    assert saved_creators == []
+
+    monkeypatch.setattr(config, "DY_FORCE_CREATOR_REFRESH", True)
+    forced = DouYinCrawler()
+    forced.dy_client = FakeClient()
+    asyncio.run(forced.fetch_creator_profile(raw_creator_id))
+    assert forced.dy_client.calls == 1
+    assert len(saved_creators) == 1
+
+
+def test_sqlite_aweme_snapshot_is_idempotent_per_run_and_appends_next_run(monkeypatch):
+    import store.douyin._store_impl as store_module
+
+    async def scenario():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        @asynccontextmanager
+        async def memory_session():
+            async with factory() as session:
+                try:
+                    yield session
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
+
+        monkeypatch.setattr(store_module, "get_session", memory_session)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = store_module.DouyinSqliteStoreImplement()
+        first = {
+            "aweme_id": "a1", "liked_count": 10, "collected_count": 2,
+            "comment_count": 3, "share_count": 4, "play_count": 100,
+            "observed_at": 1, "crawl_run_id": "run-1", "source_mode": "detail",
+        }
+        await store.store_aweme_metric(first)
+        await store.store_aweme_metric({**first, "liked_count": 99})
+        await store.store_aweme_metric({**first, "crawl_run_id": "run-2", "observed_at": 2})
+        async with factory() as session:
+            count = await session.scalar(select(func.count()).select_from(DouyinAwemeMetricSnapshot))
+            rows = (await session.execute(
+                select(DouyinAwemeMetricSnapshot).order_by(DouyinAwemeMetricSnapshot.crawl_run_id)
+            )).scalars().all()
+        await engine.dispose()
+        return count, rows
+
+    count, rows = asyncio.run(scenario())
+    assert count == 2
+    assert [(row.crawl_run_id, row.liked_count) for row in rows] == [
+        ("run-1", 10), ("run-2", 10)
+    ]
+
+
+def test_jsonl_and_sqlite_content_core_fields_match(monkeypatch, tmp_path):
+    import store.douyin._store_impl as store_module
+
+    content = {
+        "aweme_id": "a-parity", "creator_hash": "creator-hash", "nickname": "测***号",
+        "aweme_type": "video", "title": "完整标题", "desc": "完整文案",
+        "liked_count": 12, "collected_count": None, "comment_count": 3,
+        "share_count": 4, "play_count": 500, "duration_ms": 3210,
+        "width": 1080, "height": 1920, "hashtags": [{"id": "t1", "name": "话题"}],
+        "mentions": [], "music_id": "m1", "music_title": "音乐",
+        "music_author": "作者", "source_keyword": "人工智能", "source_topic": "",
+        "crawl_run_id": "run-parity", "collected_at": 123,
+    }
+
+    async def scenario():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        @asynccontextmanager
+        async def memory_session():
+            async with factory() as session:
+                try:
+                    yield session
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
+
+        monkeypatch.setattr(store_module, "get_session", memory_session)
+        monkeypatch.setattr(config, "SAVE_DATA_PATH", str(tmp_path))
+        monkeypatch.setattr(config, "ENABLE_GET_WORDCLOUD", False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await store_module.DouyinSqliteStoreImplement().store_content(content)
+        await store_module.DouyinJsonlStoreImplement().store_content(content)
+        async with factory() as session:
+            row = await session.scalar(select(DouyinAweme).where(DouyinAweme.aweme_id == "a-parity"))
+        await engine.dispose()
+        return row
+
+    row = asyncio.run(scenario())
+    jsonl_record = json.loads((tmp_path / "douyin" / "contents.jsonl").read_text(encoding="utf-8"))
+    sqlite_record = {key: getattr(row, key) for key in content}
+    sqlite_record["hashtags"] = json.loads(sqlite_record["hashtags"])
+    sqlite_record["mentions"] = json.loads(sqlite_record["mentions"])
+    assert {key: jsonl_record[key] for key in content} == sqlite_record
+
+
 def test_topic_id_parser_accepts_id_and_url_forms():
     assert parse_topic_id_from_url("123456") == "123456"
     assert parse_topic_id_from_url("https://www.douyin.com/challenge/98765") == "98765"
@@ -367,6 +515,54 @@ def test_comment_resume_does_not_rewrite_durable_primary_page(monkeypatch):
 
     assert primary_calls == [0]
     assert stored == ["c1", "s1"]
+    assert checkpoints[("comments", "a1")].status == "complete"
+
+
+def test_comment_total_limit_truncates_reply_page_exactly(monkeypatch):
+    import media_platform.douyin.client as client_module
+
+    client = object.__new__(DouYinClient)
+    stored = []
+    checkpoints = {}
+
+    async def primary(_aweme_id, _cursor):
+        return {
+            "comments": [{"cid": "c1", "reply_comment_total": 3}],
+            "cursor": 1, "has_more": 0,
+        }
+
+    async def replies(_aweme_id, comment_id, _cursor):
+        return {
+            "comments": [
+                {"cid": "s1", "reply_id": comment_id},
+                {"cid": "s2", "reply_id": comment_id},
+                {"cid": "s3", "reply_id": comment_id},
+            ],
+            "cursor": 1, "has_more": 0,
+        }
+
+    async def callback(_aweme_id, comments):
+        stored.extend(item["cid"] for item in comments)
+
+    async def load(scope, scope_id):
+        return checkpoints.get((scope, scope_id))
+
+    async def save(item):
+        checkpoints[(item.scope, item.scope_id)] = item
+
+    monkeypatch.setattr(client, "get_aweme_comments", primary)
+    monkeypatch.setattr(client, "get_sub_comments", replies)
+    monkeypatch.setattr(client_module, "load_checkpoint", load)
+    monkeypatch.setattr(client_module, "save_checkpoint", save)
+
+    result = asyncio.run(client.get_aweme_all_comments(
+        "a1", crawl_interval=0, is_fetch_sub_comments=True,
+        callback=callback, max_count=2,
+    ))
+
+    assert [item["cid"] for item in result] == ["c1", "s1"]
+    assert stored == ["c1", "s1"]
+    assert checkpoints[("comments", "a1")].collected_count == 2
     assert checkpoints[("comments", "a1")].status == "complete"
 
 
@@ -551,6 +747,35 @@ def test_keyword_search_respects_small_limit_and_fetches_details(monkeypatch):
     assert len(fake_client.search_calls) == 1
     assert checkpoints[-1].status == "complete"
     assert checkpoints[-1].collected_count == 2
+
+
+def test_keyword_search_missing_data_is_failed_not_empty_success(monkeypatch):
+    import media_platform.douyin.core as core_module
+
+    class FakeClient:
+        async def search_info_by_keyword(self, **_kwargs):
+            return {"status_code": 8, "status_msg": "login expired"}
+
+    crawler = DouYinCrawler()
+    crawler.dy_client = FakeClient()
+    checkpoints = []
+
+    async def no_checkpoint(*_args):
+        return None
+
+    async def save(item):
+        checkpoints.append(item)
+
+    monkeypatch.setattr(config, "KEYWORDS", "人工智能")
+    monkeypatch.setattr(config, "START_PAGE", 1)
+    monkeypatch.setattr(config, "CRAWLER_MAX_NOTES_COUNT", 1)
+    monkeypatch.setattr(core_module, "load_checkpoint", no_checkpoint)
+    monkeypatch.setattr(core_module, "save_checkpoint", save)
+
+    asyncio.run(crawler.search())
+
+    assert checkpoints[-1].status == "failed"
+    assert "missing data" in checkpoints[-1].last_error
 
 
 def test_topic_mode_uses_true_topic_endpoint_without_keyword_fallback(monkeypatch):
