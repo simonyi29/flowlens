@@ -837,6 +837,127 @@ def test_keyword_search_missing_data_is_failed_not_empty_success(monkeypatch):
     assert "missing data" in checkpoints[-1].last_error
 
 
+def test_keyword_search_retries_with_exponential_backoff(monkeypatch):
+    import media_platform.douyin.core as core_module
+    from media_platform.douyin.exception import DataFetchError
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def search_info_by_keyword(self, **_kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                raise DataFetchError("temporary")
+            return {"data": [{"aweme_info": {"aweme_id": "a1"}}]}
+
+        async def get_video_by_id(self, aweme_id):
+            return {"aweme_id": aweme_id}
+
+    crawler = DouYinCrawler()
+    crawler.dy_client = FakeClient()
+    sleeps = []
+
+    async def no_checkpoint(*_args):
+        return None
+
+    async def ignore_checkpoint(_item):
+        return None
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    async def ignore_detail(_item):
+        return None
+
+    async def ignore_comments(_items):
+        return None
+
+    monkeypatch.setattr(config, "KEYWORDS", "人工智能")
+    monkeypatch.setattr(config, "START_PAGE", 1)
+    monkeypatch.setattr(config, "CRAWLER_MAX_NOTES_COUNT", 1)
+    monkeypatch.setattr(config, "MAX_CONCURRENCY_NUM", 1)
+    monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
+    monkeypatch.setattr(core_module, "load_checkpoint", no_checkpoint)
+    monkeypatch.setattr(core_module, "save_checkpoint", ignore_checkpoint)
+    monkeypatch.setattr(core_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(crawler, "process_aweme_detail", ignore_detail)
+    monkeypatch.setattr(crawler, "batch_get_note_comments", ignore_comments)
+
+    asyncio.run(crawler.search())
+
+    assert crawler.dy_client.calls == 3
+    assert sleeps[:2] == [1, 2]
+
+
+def test_crawler_cancellation_uses_transcript_cancel_path(monkeypatch):
+    import media_platform.douyin.core as core_module
+
+    class FakePlaywrightContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakePage:
+        async def goto(self, _url):
+            return None
+
+    class FakeBrowserContext:
+        async def new_page(self):
+            return FakePage()
+
+    class FakeClient:
+        async def pong(self, browser_context):
+            return True
+
+        async def get_aweme_media(self, _url):
+            return None
+
+    class FakeTranscriptService:
+        def __init__(self, _downloader):
+            self.cancelled = 0
+            self.drained = 0
+
+        async def start(self):
+            return None
+
+        async def cancel_and_close(self):
+            self.cancelled += 1
+
+        async def drain_and_close(self):
+            self.drained += 1
+
+    crawler = DouYinCrawler()
+
+    async def launch(*_args, **_kwargs):
+        return FakeBrowserContext()
+
+    async def client(_proxy):
+        return FakeClient()
+
+    async def cancelled_search():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(config, "ENABLE_IP_PROXY", False)
+    monkeypatch.setattr(config, "ENABLE_CDP_MODE", True)
+    monkeypatch.setattr(config, "CDP_HEADLESS", False)
+    monkeypatch.setattr(config, "CRAWLER_TYPE", "search")
+    monkeypatch.setattr(config, "DY_ENABLE_NATIVE_SUBTITLE", True)
+    monkeypatch.setattr(core_module, "async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr(core_module, "DouyinTranscriptService", FakeTranscriptService)
+    monkeypatch.setattr(crawler, "launch_browser_with_cdp", launch)
+    monkeypatch.setattr(crawler, "create_douyin_client", client)
+    monkeypatch.setattr(crawler, "search", cancelled_search)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(crawler.start())
+
+    assert crawler.transcript_service.cancelled == 1
+    assert crawler.transcript_service.drained == 0
+
+
 def test_topic_mode_uses_true_topic_endpoint_without_keyword_fallback(monkeypatch):
     import media_platform.douyin.core as core_module
 
