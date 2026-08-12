@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import json
 from contextlib import asynccontextmanager
 import pytest
@@ -638,6 +639,64 @@ def test_asr_failure_always_removes_temporary_media(monkeypatch, tmp_path):
         assert "inference failed" in str(exc)
     else:
         raise AssertionError("ASR failure should propagate to the worker")
+    assert not list((tmp_path / "data/douyin/tmp").glob("*.mp4"))
+
+
+def test_asr_missing_optional_dependency_returns_actionable_error(monkeypatch, tmp_path):
+    service = DouyinTranscriptService(lambda _url: None)
+    media_path = tmp_path / "sample.mp4"
+    media_path.write_bytes(b"video")
+    real_import = builtins.__import__
+
+    def missing_whisper(name, *args, **kwargs):
+        if name == "faster_whisper":
+            raise ImportError("missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_whisper)
+    with pytest.raises(RuntimeError, match=r"uv sync --extra asr"):
+        service._transcribe(media_path)
+
+
+def test_asr_empty_audio_result_is_saved_as_retryable_failure(monkeypatch, tmp_path):
+    import media_platform.douyin.transcript as transcript_module
+
+    saved = []
+    checkpoints = []
+
+    async def downloader(_url):
+        return b"video-without-audio"
+
+    async def save_transcript(item):
+        saved.append(item)
+
+    async def no_checkpoint(_scope, _scope_id):
+        return None
+
+    async def save_checkpoint(item):
+        checkpoints.append(item)
+
+    async def scenario():
+        service = DouyinTranscriptService(downloader)
+        monkeypatch.setattr(service, "_transcribe", lambda _path: [])
+        await service.enqueue({
+            "aweme_id": "silent",
+            "video": {"play_addr": {"url_list": ["video-url"]}},
+        })
+        await service.drain_and_close()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "DY_ENABLE_NATIVE_SUBTITLE", False)
+    monkeypatch.setattr(config, "DY_ENABLE_ASR", True)
+    monkeypatch.setattr(config, "DY_KEEP_MEDIA", False)
+    monkeypatch.setattr(transcript_module.douyin_store, "save_transcript", save_transcript)
+    monkeypatch.setattr(transcript_module, "load_checkpoint", no_checkpoint)
+    monkeypatch.setattr(transcript_module, "save_checkpoint", save_checkpoint)
+    asyncio.run(scenario())
+
+    assert saved[-1].status == "failed"
+    assert "no speech segments" in saved[-1].error_message
+    assert checkpoints[-1].status == "partial"
     assert not list((tmp_path / "data/douyin/tmp").glob("*.mp4"))
 
 
