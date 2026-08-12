@@ -262,16 +262,34 @@ class DouyinTranscriptService:
             self.model = WhisperModel(
                 getattr(config, "DY_ASR_MODEL", "small"), device=device, compute_type=compute_type
             )
-        result, _ = self.model.transcribe(
-            str(media_path), language=getattr(config, "DY_ASR_LANGUAGE", "zh") or None
-        )
-        return [
-            DouyinTranscriptSegment(
-                start_ms=round(segment.start * 1000), end_ms=round(segment.end * 1000),
-                text=segment.text.strip(),
+        def run_model():
+            result, _ = self.model.transcribe(
+                str(media_path), language=getattr(config, "DY_ASR_LANGUAGE", "zh") or None
             )
-            for segment in result if segment.text.strip()
-        ]
+            return [
+                DouyinTranscriptSegment(
+                    start_ms=round(segment.start * 1000), end_ms=round(segment.end * 1000),
+                    text=segment.text.strip(),
+                )
+                for segment in result if segment.text.strip()
+            ]
+
+        try:
+            return run_model()
+        except RuntimeError as exc:
+            # ctranslate2 may report a CUDA device even when the matching CUDA
+            # runtime DLLs are absent. ``auto`` must remain usable on CPU-only
+            # installations, so retry once with the documented CPU settings.
+            message = str(exc).lower()
+            if not any(token in message for token in ("cublas", "cudnn", "cuda")):
+                raise
+            utils.logger.warning(
+                "[DouyinTranscriptService] CUDA runtime unavailable; retrying ASR on CPU"
+            )
+            self.model = WhisperModel(
+                getattr(config, "DY_ASR_MODEL", "small"), device="cpu", compute_type="int8"
+            )
+            return run_model()
 
     async def _save_completed(self, aweme_id, segments, source, language, model_name) -> None:
         output_dir = Path("data/douyin/transcripts")

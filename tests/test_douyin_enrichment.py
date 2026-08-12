@@ -544,6 +544,46 @@ def test_comment_checkpoint_resumes_after_successful_page(monkeypatch):
     assert saved[-1].status == "complete"
 
 
+def test_comment_limit_marks_unfinished_checkpoint_partial(monkeypatch):
+    import media_platform.douyin.client as client_module
+
+    client = object.__new__(DouYinClient)
+    checkpoints = {}
+
+    async def primary(_aweme_id, _cursor):
+        return {
+            "comments": [
+                {"cid": "c1", "reply_comment_total": 2},
+                {"cid": "c2"},
+            ],
+            "cursor": 20,
+            "has_more": 1,
+            "total": 100,
+        }
+
+    async def load(scope, scope_id):
+        return checkpoints.get((scope, scope_id))
+
+    async def save(item):
+        checkpoints[(item.scope, item.scope_id)] = item
+
+    monkeypatch.setattr(client, "get_aweme_comments", primary)
+    monkeypatch.setattr(client_module, "load_checkpoint", load)
+    monkeypatch.setattr(client_module, "save_checkpoint", save)
+
+    result = asyncio.run(
+        client.get_aweme_all_comments(
+            "a1", crawl_interval=0, is_fetch_sub_comments=True, max_count=2,
+        )
+    )
+
+    assert [item["cid"] for item in result] == ["c1", "c2"]
+    checkpoint = checkpoints[("comments", "a1")]
+    assert checkpoint.status == "partial"
+    assert checkpoint.collected_count == 2
+    assert checkpoint.pending_items[0]["comment_id"] == "c1"
+
+
 def test_comment_resume_does_not_rewrite_durable_primary_page(monkeypatch):
     import media_platform.douyin.client as client_module
 
@@ -733,6 +773,39 @@ def test_asr_missing_optional_dependency_returns_actionable_error(monkeypatch, t
     monkeypatch.setattr(builtins, "__import__", missing_whisper)
     with pytest.raises(RuntimeError, match=r"uv sync --extra asr"):
         service._transcribe(media_path)
+
+
+def test_asr_auto_falls_back_to_cpu_when_cuda_runtime_is_missing(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    calls = []
+
+    class Segment:
+        start = 0
+        end = 1
+        text = "回退成功"
+
+    class FakeModel:
+        def __init__(self, _name, device, compute_type):
+            calls.append((device, compute_type))
+            self.device = device
+
+        def transcribe(self, _path, language):
+            if self.device == "auto":
+                raise RuntimeError("Library cublas64_12.dll is not found")
+            return [Segment()], None
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=FakeModel))
+    monkeypatch.setitem(sys.modules, "ctranslate2", types.SimpleNamespace(get_cuda_device_count=lambda: 1))
+    service = DouyinTranscriptService(lambda _url: None)
+    media_path = tmp_path / "sample.mp4"
+    media_path.write_bytes(b"video")
+
+    segments = service._transcribe(media_path)
+
+    assert calls == [("auto", "float16"), ("cpu", "int8")]
+    assert segments[0].text == "回退成功"
 
 
 def test_asr_empty_audio_result_is_saved_as_retryable_failure(monkeypatch, tmp_path):

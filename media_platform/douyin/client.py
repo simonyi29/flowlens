@@ -365,6 +365,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                     sub_cursor = int(response.get("cursor") or previous_sub_cursor)
                     sub_comments = response.get("comments") or []
                     limit = remaining()
+                    sub_page_truncated = limit is not None and len(sub_comments) > limit
                     if limit is not None:
                         sub_comments = sub_comments[:limit]
                     for sub_comment in sub_comments:
@@ -376,7 +377,12 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                             await callback(aweme_id, sub_comments)
                         result.extend(sub_comments)
                         sub_collected += len(sub_comments)
-                    sub_status = "complete" if not sub_has_more or (max_count and collected_count + len(sub_comments) >= max_count) else "running"
+                    sub_status = (
+                        "partial"
+                        if max_count and collected_count + len(sub_comments) >= max_count
+                        and (sub_has_more or sub_page_truncated)
+                        else "complete" if not sub_has_more else "running"
+                    )
                     await save_checkpoint(
                         DouyinCrawlCheckpoint(
                             scope="sub_comments", scope_id=sub_scope_id,
@@ -391,7 +397,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                     if not sub_comments or sub_cursor == previous_sub_cursor:
                         break
                     await asyncio.sleep(crawl_interval)
-                if not sub_has_more or (max_count and collected_count >= max_count):
+                if not sub_has_more:
                     pending_items.remove(pending)
                     await persist_parent()
 
@@ -432,7 +438,12 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                 await persist_parent()
                 if pending_items and (max_count == 0 or collected_count < max_count):
                     await process_pending_replies()
-                status = "complete" if not comments_has_more or (max_count and collected_count >= max_count) else "running"
+                reached_limit = bool(max_count and collected_count >= max_count)
+                status = (
+                    "partial" if reached_limit and (comments_has_more or pending_items)
+                    else "complete" if not comments_has_more and not pending_items
+                    else "running"
+                )
                 if status == "complete":
                     pending_items.clear()
                 await persist_parent(status)
