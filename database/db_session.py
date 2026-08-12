@@ -81,6 +81,10 @@ async def create_tables(db_type: str = None):
     engine = get_async_engine(db_type)
     if engine:
         async with engine.begin() as conn:
+            if db_type == "sqlite":
+                from database.douyin_migrations import migrate_douyin_sqlite
+
+                await migrate_douyin_sqlite(conn)
             await conn.run_sync(Base.metadata.create_all)
 
 

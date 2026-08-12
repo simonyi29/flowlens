@@ -20,6 +20,19 @@
 # Douyin platform configuration
 PUBLISH_TIME_TYPE = 0
 
+# Douyin enhanced collection. These options are intentionally scoped to Douyin
+# so enabling them never changes another platform's behaviour.
+DY_TOPICS = ""
+DY_ENABLE_CREATOR_PROFILE = True
+DY_FORCE_CREATOR_REFRESH = False
+DY_CREATOR_REFRESH_INTERVAL_SEC = 24 * 60 * 60
+DY_ENABLE_NATIVE_SUBTITLE = True
+DY_ENABLE_ASR = True
+DY_ASR_MODEL = "small"
+DY_ASR_LANGUAGE = "zh"
+DY_SAVE_RAW_PAYLOAD = False
+DY_KEEP_MEDIA = False
+
 # Specify DY video URL list (supports multiple formats)
 # Supported formats:
 # 1. Full video URL: "https://www.douyin.com/video/7525538910311632128"

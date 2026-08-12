@@ -147,7 +147,23 @@ export function CrawlerConfigPanel() {
   const isBusy = isStarting || isStopping || status === 'stopping'
 
   const handleStart = () => {
-    startCrawler(config)
+    if (config.platform === 'dy') {
+      startCrawler(config)
+      return
+    }
+    const {
+      topics: _topics,
+      enable_creator_profile: _creatorProfile,
+      force_creator_refresh: _forceCreatorRefresh,
+      enable_native_subtitle: _nativeSubtitle,
+      enable_asr: _asr,
+      asr_model: _asrModel,
+      asr_language: _asrLanguage,
+      save_raw_payload: _rawPayload,
+      keep_media: _keepMedia,
+      ...commonConfig
+    } = config
+    startCrawler(commonConfig as typeof config)
   }
 
   const handleStop = () => {
@@ -167,7 +183,11 @@ export function CrawlerConfigPanel() {
           <Field label={t('field.platform')}>
             <Select
               value={config.platform}
-              onValueChange={(value) => updateConfig({ platform: value })}
+              onValueChange={(value) => updateConfig({
+                platform: value,
+                crawler_type: config.crawler_type === 'topic' && value !== 'dy' ? 'search' : config.crawler_type,
+                save_option: value === 'dy' && !['jsonl', 'sqlite'].includes(config.save_option) ? 'jsonl' : config.save_option,
+              })}
               disabled={isDisabled}
             >
               <SelectTrigger className="h-9 text-xs">
@@ -194,7 +214,7 @@ export function CrawlerConfigPanel() {
                   <SelectValue placeholder={t('field.crawlTypePlaceholder')} />
                 </SelectTrigger>
                 <SelectContent>
-                  {options?.crawler_types.map((type) => (
+                  {options?.crawler_types.filter((type) => type.value !== 'topic' || config.platform === 'dy').map((type) => (
                     <SelectItem key={type.value} value={type.value}>
                       {type.label}
                     </SelectItem>
@@ -223,6 +243,18 @@ export function CrawlerConfigPanel() {
                 value={config.keywords}
                 onChange={(keywords) => updateConfig({ keywords })}
                 disabled={isDisabled}
+              />
+            </Field>
+          )}
+
+          {config.platform === 'dy' && config.crawler_type === 'topic' && (
+            <Field label={t('field.topics')} hint={t('field.topicsHint')}>
+              <textarea
+                value={config.topics}
+                onChange={(e) => updateConfig({ topics: e.target.value })}
+                disabled={isDisabled}
+                placeholder={t('field.topicsPlaceholder')}
+                className="min-h-[60px] w-full rounded-md border border-cyber-border-DEFAULT bg-cyber-bg-tertiary px-3 py-2 text-xs font-mono text-cyber-text-primary placeholder:text-cyber-text-muted focus-visible:outline-none focus-visible:border-cyber-neon-cyan/50 transition-all resize-none"
               />
             </Field>
           )}
@@ -334,7 +366,7 @@ export function CrawlerConfigPanel() {
                 <SelectValue placeholder={t('field.saveFormatPlaceholder')} />
               </SelectTrigger>
               <SelectContent>
-                {options?.save_options.map((option) => (
+                {options?.save_options.filter((option) => config.platform !== 'dy' || ['jsonl', 'sqlite'].includes(option.value)).map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
@@ -387,6 +419,60 @@ export function CrawlerConfigPanel() {
           </div>
         </Section>
       </div>
+
+      {config.platform === 'dy' && (
+        <Section
+          title={t('section.douyinEnhanced.title')}
+          description={t('section.douyinEnhanced.description')}
+          icon={MessageSquare}
+        >
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Field label={t('field.maxComments')} hint={t('field.maxCommentsHint')}>
+              <Input type="number" min={0} value={config.max_comments_count}
+                onChange={(e) => updateConfig({ max_comments_count: Math.max(0, Number(e.target.value) || 0) })}
+                disabled={isDisabled} className="h-9 text-xs" />
+            </Field>
+            <Field label={t('field.asrModel')}>
+              <Input value={config.asr_model} onChange={(e) => updateConfig({ asr_model: e.target.value })}
+                disabled={isDisabled || !config.enable_asr} className="h-9 text-xs" />
+            </Field>
+            <Field label={t('field.asrLanguage')}>
+              <Input value={config.asr_language} onChange={(e) => updateConfig({ asr_language: e.target.value })}
+                disabled={isDisabled || !config.enable_asr} className="h-9 text-xs" />
+            </Field>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {[
+              ['enable_creator_profile', t('field.creatorProfile')],
+              ['force_creator_refresh', t('field.forceCreatorRefresh')],
+              ['enable_native_subtitle', t('field.nativeSubtitle')],
+              ['enable_asr', t('field.localAsr')],
+              ['save_raw_payload', t('field.rawPayload')],
+              ['keep_media', t('field.keepMedia')],
+            ].map(([key, label]) => (
+              <div key={key} className="flex items-center gap-3 rounded-lg border border-cyber-border-subtle bg-cyber-bg-tertiary/30 p-2.5">
+                <Checkbox checked={Boolean(config[key as keyof typeof config])}
+                  onCheckedChange={(checked) => updateConfig({ [key]: checked === true })}
+                  disabled={isDisabled} />
+                <p className="text-xs font-mono text-cyber-text-primary">{label}</p>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-cyber-text-muted">{t('field.asrEnvironmentHint')}</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="flex items-center gap-3 rounded-lg border border-cyber-border-subtle bg-cyber-bg-tertiary/30 p-2.5">
+              <Checkbox checked={config.enable_ip_proxy}
+                onCheckedChange={(checked) => updateConfig({ enable_ip_proxy: checked === true })}
+                disabled={isDisabled} />
+              <p className="text-xs font-mono text-cyber-text-primary">{t('field.staticProxy')}</p>
+            </div>
+            <Input value={config.static_proxy_url}
+              onChange={(e) => updateConfig({ static_proxy_url: e.target.value })}
+              disabled={isDisabled || !config.enable_ip_proxy}
+              placeholder="http://user:password@host:port" className="h-9 text-xs" />
+          </div>
+        </Section>
+      )}
 
       {/* Row 2: Start/Stop Button - Full Width */}
       <div className="w-full">

@@ -115,7 +115,6 @@ def test_api_start_crawler_without_limits():
         ("max_notes_count", 0),
         ("max_notes_count", -1),
         ("max_notes_count", 10001),
-        ("max_comments_count", 0),
         ("max_comments_count", -1),
         ("max_comments_count", 10001),
     ],
@@ -135,3 +134,39 @@ def test_api_rejects_invalid_limits(field_name, value):
 
     assert response.status_code == 422
     mock_start.assert_not_called()
+
+
+def test_douyin_topic_and_enhancement_arguments_are_forwarded():
+    request = CrawlerStartRequest(
+        platform=PlatformEnum.DOUYIN,
+        crawler_type=CrawlerTypeEnum.TOPIC,
+        topics="人工智能,123",
+        max_comments_count=0,
+        enable_creator_profile=True,
+        force_creator_refresh=True,
+        enable_native_subtitle=False,
+        enable_asr=True,
+        asr_model="small",
+        asr_language="zh",
+        save_raw_payload=True,
+        keep_media=False,
+    )
+    command = CrawlerManager()._build_command(request)
+    assert command[command.index("--topics") + 1] == "人工智能,123"
+    assert command[command.index("--max_comments_count_singlenotes") + 1] == "0"
+    assert command[command.index("--enable_creator_profile") + 1] == "true"
+    assert command[command.index("--enable_native_subtitle") + 1] == "true"
+    assert command[command.index("--enable_asr") + 1] == "true"
+    assert command[command.index("--save_raw_payload") + 1] == "true"
+
+
+def test_api_rejects_topic_and_douyin_options_for_other_platforms():
+    client = TestClient(app)
+    topic_response = client.post("/api/crawler/start", json={
+        "platform": "xhs", "crawler_type": "topic", "topics": "人工智能"
+    })
+    option_response = client.post("/api/crawler/start", json={
+        "platform": "xhs", "crawler_type": "search", "enable_asr": True
+    })
+    assert topic_response.status_code == 422
+    assert option_response.status_code == 422

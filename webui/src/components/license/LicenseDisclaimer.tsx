@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next'
 import { ShieldAlert, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
-const LICENSE_KEY = 'mediacrawler_license_accepted'
+const LICENSE_KEY = 'flowlens_license_accepted'
 
 // 检查是否已经接受协议
 export function isLicenseAccepted(): boolean {
@@ -112,7 +112,7 @@ export function LicenseDisclaimer({ onAccept }: LicenseDisclaimerProps) {
         {/* License Link */}
         <div className="flex justify-center mb-6">
           <a
-            href="https://github.com/NanmiCoder/MediaCrawler/blob/main/LICENSE"
+            href="https://github.com/simonyi29/flowlens/blob/main/LICENSE"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 text-cyber-neon-cyan hover:underline text-sm font-mono"

@@ -1,4 +1,4 @@
-import { Bug, Wifi, AlertTriangle, Github } from 'lucide-react'
+import { Wifi, AlertTriangle, Github } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { useCrawlerStore } from '@/store/crawlerStore'
@@ -25,12 +25,12 @@ export function Sidebar({ onShowDisclaimer }: SidebarProps) {
       <div className="h-full px-4 flex items-center justify-between">
         {/* Left: Logo and GitHub Star */}
         <div className="flex items-center gap-3">
-          <Bug className="w-5 h-5 text-cyber-neon-cyan" />
+          <img src="/logos/flowlens-favicon.png" alt="FlowLens" className="w-7 h-7 rounded-md" />
           <span className="font-mono font-bold text-cyber-text-primary tracking-wider text-sm">
-            MediaCrawler
+            流镜 FlowLens
           </span>
           <a
-            href="https://github.com/NanmiCoder/MediaCrawler"
+            href="https://github.com/simonyi29/flowlens"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 px-2 py-1 rounded-md border border-cyber-border-subtle hover:border-cyber-neon-cyan hover:shadow-glow-cyan-sm transition-all bg-cyber-bg-tertiary"

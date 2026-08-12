@@ -96,16 +96,29 @@ class DouyinAweme(Base):
     title = Column(Text, comment='作品标题')
     desc = Column(Text, comment='作品描述')
     create_time = Column(BigInteger, index=True, comment='创建时间戳')
-    liked_count = Column(Text, comment='点赞数')
-    comment_count = Column(Text, comment='评论数')
-    share_count = Column(Text, comment='分享数')
-    collected_count = Column(Text, comment='收藏数')
+    liked_count = Column(BigInteger, nullable=True, comment='点赞数')
+    comment_count = Column(BigInteger, nullable=True, comment='评论数')
+    share_count = Column(BigInteger, nullable=True, comment='分享数')
+    collected_count = Column(BigInteger, nullable=True, comment='收藏数')
     aweme_url = Column(Text, comment='作品URL')
     cover_url = Column(Text, comment='封面URL')
     video_download_url = Column(Text, comment='视频下载URL')
     music_download_url = Column(Text, comment='音乐下载URL')
     note_download_url = Column(Text, comment='笔记下载URL')
     source_keyword = Column(Text, default='', comment='来源关键词')
+    source_topic = Column(Text, default='', comment='来源话题')
+    play_count = Column(BigInteger, nullable=True, comment='播放数')
+    duration_ms = Column(BigInteger, nullable=True, comment='视频时长毫秒')
+    width = Column(Integer, nullable=True, comment='视频宽度')
+    height = Column(Integer, nullable=True, comment='视频高度')
+    hashtags = Column(Text, default='[]', comment='话题标签JSON')
+    mentions = Column(Text, default='[]', comment='提及用户JSON')
+    music_id = Column(String(255), default='', comment='音乐ID')
+    music_title = Column(Text, default='', comment='音乐标题')
+    music_author = Column(Text, default='', comment='音乐作者')
+    crawl_run_id = Column(String(64), default='', index=True, comment='采集批次')
+    collected_at = Column(BigInteger, nullable=True, comment='采集时间戳')
+    raw_payload = Column(Text, nullable=True, comment='脱敏原始响应JSON')
 
 class DouyinAwemeComment(Base):
     __tablename__ = 'douyin_aweme_comment'
@@ -118,10 +131,86 @@ class DouyinAwemeComment(Base):
     aweme_id = Column(String(255), index=True, comment='作品ID')
     content = Column(Text, comment='评论内容')
     create_time = Column(BigInteger, comment='创建时间戳')
-    sub_comment_count = Column(Text, comment='子评论数')
+    sub_comment_count = Column(BigInteger, nullable=True, comment='子评论数')
     parent_comment_id = Column(String(255), comment='父评论ID')
-    like_count = Column(Text, default='0', comment='点赞数')
+    like_count = Column(BigInteger, nullable=True, comment='点赞数')
     pictures = Column(Text, default='', comment='图片')
+    root_comment_id = Column(String(255), default='', index=True, comment='根评论ID')
+    level = Column(Integer, default=1, comment='评论层级')
+    crawl_run_id = Column(String(64), default='', index=True, comment='采集批次')
+
+
+class DouyinCreator(Base):
+    __tablename__ = 'douyin_creator'
+    id = Column(Integer, primary_key=True)
+    creator_hash = Column(String(64), nullable=False, unique=True, index=True)
+    nickname = Column(Text, default='', comment='脱敏昵称')
+    signature = Column(Text, default='', comment='公开简介')
+    verified = Column(Integer, default=0)
+    verification_type = Column(Text, default='')
+    follower_count = Column(BigInteger, nullable=True)
+    following_count = Column(BigInteger, nullable=True)
+    aweme_count = Column(BigInteger, nullable=True)
+    total_favorited = Column(BigInteger, nullable=True)
+    crawl_run_id = Column(String(64), default='', index=True)
+    collected_at = Column(BigInteger, nullable=True, index=True)
+    raw_payload = Column(Text, nullable=True)
+
+
+class DouyinTopic(Base):
+    __tablename__ = 'douyin_topic'
+    id = Column(Integer, primary_key=True)
+    topic_id = Column(String(255), nullable=False, unique=True, index=True)
+    name = Column(Text, default='')
+    topic_url = Column(Text, default='')
+    view_count = Column(BigInteger, nullable=True)
+    aweme_count = Column(BigInteger, nullable=True)
+    crawl_run_id = Column(String(64), default='', index=True)
+    collected_at = Column(BigInteger, nullable=True)
+    raw_payload = Column(Text, nullable=True)
+
+
+class DouyinTranscript(Base):
+    __tablename__ = 'douyin_transcript'
+    id = Column(Integer, primary_key=True)
+    aweme_id = Column(String(255), nullable=False, unique=True, index=True)
+    source = Column(String(32), default='')
+    language = Column(String(32), default='zh')
+    full_text = Column(Text, default='')
+    segments = Column(Text, default='[]')
+    srt_path = Column(Text, default='')
+    model_name = Column(Text, default='')
+    status = Column(String(32), default='pending', index=True)
+    error_message = Column(Text, default='')
+    retry_count = Column(Integer, default=0)
+    processed_at = Column(BigInteger, nullable=True)
+
+
+class DouyinAwemeMetricSnapshot(Base):
+    __tablename__ = 'douyin_aweme_metric_snapshot'
+    id = Column(Integer, primary_key=True)
+    aweme_id = Column(String(255), nullable=False, index=True)
+    liked_count = Column(BigInteger, nullable=True)
+    collected_count = Column(BigInteger, nullable=True)
+    comment_count = Column(BigInteger, nullable=True)
+    share_count = Column(BigInteger, nullable=True)
+    play_count = Column(BigInteger, nullable=True)
+    observed_at = Column(BigInteger, nullable=False, index=True)
+    crawl_run_id = Column(String(64), nullable=False, index=True)
+    source_mode = Column(String(32), default='')
+
+
+class DouyinCreatorMetricSnapshot(Base):
+    __tablename__ = 'douyin_creator_metric_snapshot'
+    id = Column(Integer, primary_key=True)
+    creator_hash = Column(String(64), nullable=False, index=True)
+    follower_count = Column(BigInteger, nullable=True)
+    following_count = Column(BigInteger, nullable=True)
+    aweme_count = Column(BigInteger, nullable=True)
+    total_favorited = Column(BigInteger, nullable=True)
+    observed_at = Column(BigInteger, nullable=False, index=True)
+    crawl_run_id = Column(String(64), nullable=False, index=True)
+    source_mode = Column(String(32), default='')
 
 class KuaishouVideo(Base):
     __tablename__ = 'kuaishou_video'

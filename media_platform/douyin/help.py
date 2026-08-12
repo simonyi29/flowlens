@@ -29,6 +29,7 @@ import re
 from typing import Optional
 
 import execjs
+from urllib.parse import parse_qs, urlparse
 from playwright.async_api import Page
 
 from model.m_douyin import VideoUrlInfo, CreatorUrlInfo
@@ -159,7 +160,24 @@ def parse_creator_info_from_url(url: str) -> CreatorUrlInfo:
     match = re.search(user_pattern, url)
     if match:
         sec_user_id = match.group(1)
-        return CreatorUrlInfo(sec_user_id=sec_user_id)
+    return CreatorUrlInfo(sec_user_id=sec_user_id)
+
+
+def parse_topic_id_from_url(value: str) -> str:
+    """Parse a Douyin challenge/topic URL or a plain numeric topic id."""
+    value = str(value or "").strip()
+    if value.isdigit():
+        return value
+    parsed = urlparse(value)
+    query = parse_qs(parsed.query)
+    for key in ("challenge_id", "cha_id", "topic_id"):
+        candidate = (query.get(key) or [""])[0]
+        if candidate.isdigit():
+            return candidate
+    match = re.search(r"/(?:challenge|topic)/(\d+)", parsed.path)
+    if match:
+        return match.group(1)
+    raise ValueError(f"Cannot parse Douyin topic id from {value!r}")
 
     raise ValueError(f"Unable to parse creator ID from URL: {url}")
 

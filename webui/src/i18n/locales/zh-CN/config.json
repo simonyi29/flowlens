@@ -15,7 +15,8 @@
     "runtime": {
       "title": "运行参数",
       "description": "运行时参数"
-    }
+    },
+    "douyinEnhanced": {"title": "抖音增强配置", "description": "账号、完整评论、字幕与本地 ASR"}
   },
   "field": {
     "platform": "平台",
@@ -57,6 +58,21 @@
     "subComments": "子评论",
     "headlessMode": "无头模式",
     "headlessModeHint": "无 GUI 运行浏览器"
+    ,"topics": "话题名称、URL 或 ID"
+    ,"topicsHint": "多个话题用逗号分隔；不会降级为关键词搜索"
+    ,"topicsPlaceholder": "例如：人工智能, https://www.douyin.com/challenge/123"
+    ,"maxComments": "单视频评论安全上限"
+    ,"maxCommentsHint": "0 表示采集接口可见的全部一级和二级评论"
+    ,"creatorProfile": "账号公开指标"
+    ,"forceCreatorRefresh": "强制刷新账号"
+    ,"nativeSubtitle": "原生字幕探测"
+    ,"localAsr": "本地 ASR 兜底"
+    ,"asrModel": "ASR 模型"
+    ,"asrLanguage": "ASR 语言"
+    ,"rawPayload": "保存脱敏原始响应"
+    ,"keepMedia": "保留 ASR 临时媒体"
+    ,"asrEnvironmentHint": "未安装 faster-whisper 时，只有字幕任务会标记失败，内容与评论仍会保存。"
+    ,"staticProxy": "启用已有静态代理（默认关闭）"
   },
   "button": {
     "initiateScan": "开始爬虫",

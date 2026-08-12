@@ -27,7 +27,7 @@ interface CrawlerState {
 }
 
 // 持久化相关的 localStorage key
-const CLEARED_LOG_ID_KEY = 'mediacrawler_cleared_log_id'
+const CLEARED_LOG_ID_KEY = 'flowlens_cleared_log_id'
 
 // 从 localStorage 读取清除标记
 function getClearedLogIdFromStorage(): number | null {
@@ -53,12 +53,25 @@ const defaultConfig: CrawlerConfig = {
   keywords: '',
   specified_ids: '',
   creator_ids: '',
+  topics: '',
   start_page: 1,
   enable_comments: true,
-  enable_sub_comments: false,
-  save_option: 'json',
+  enable_sub_comments: true,
+  save_option: 'jsonl',
   cookies: '',
   headless: false,
+  max_notes_count: 20,
+  max_comments_count: 0,
+  enable_creator_profile: true,
+  force_creator_refresh: false,
+  enable_native_subtitle: true,
+  enable_asr: true,
+  asr_model: 'small',
+  asr_language: 'zh',
+  save_raw_payload: false,
+  keep_media: false,
+  enable_ip_proxy: false,
+  static_proxy_url: '',
 }
 
 export const useCrawlerStore = create<CrawlerState>((set, get) => ({

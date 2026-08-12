@@ -63,6 +63,7 @@ class CrawlerTypeEnum(str, Enum):
     SEARCH = "search"
     DETAIL = "detail"
     CREATOR = "creator"
+    TOPIC = "topic"
 
 
 class SaveDataOptionEnum(str, Enum):
@@ -267,14 +268,42 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 rich_help_panel="Basic Configuration",
             ),
         ] = "",
+        topics: Annotated[
+            str,
+            typer.Option("--topics", help="Douyin topic names, URLs or IDs, comma-separated"),
+        ] = getattr(config, "DY_TOPICS", ""),
+        enable_creator_profile: Annotated[
+            str, typer.Option("--enable_creator_profile", help="Collect anonymized Douyin creator profiles")
+        ] = str(getattr(config, "DY_ENABLE_CREATOR_PROFILE", True)),
+        force_creator_refresh: Annotated[
+            str, typer.Option("--force_creator_refresh", help="Ignore the Douyin creator 24-hour cache")
+        ] = str(getattr(config, "DY_FORCE_CREATOR_REFRESH", False)),
+        enable_native_subtitle: Annotated[
+            str, typer.Option("--enable_native_subtitle", help="Probe Douyin native subtitles")
+        ] = str(getattr(config, "DY_ENABLE_NATIVE_SUBTITLE", True)),
+        enable_asr: Annotated[
+            str, typer.Option("--enable_asr", help="Use local faster-whisper when no native subtitle exists")
+        ] = str(getattr(config, "DY_ENABLE_ASR", True)),
+        asr_model: Annotated[
+            str, typer.Option("--asr_model", help="faster-whisper model name")
+        ] = getattr(config, "DY_ASR_MODEL", "small"),
+        asr_language: Annotated[
+            str, typer.Option("--asr_language", help="ASR language code, empty means auto")
+        ] = getattr(config, "DY_ASR_LANGUAGE", "zh"),
+        save_raw_payload: Annotated[
+            str, typer.Option("--save_raw_payload", help="Save sanitized Douyin raw payloads")
+        ] = str(getattr(config, "DY_SAVE_RAW_PAYLOAD", False)),
+        keep_media: Annotated[
+            str, typer.Option("--keep_media", help="Keep temporary Douyin ASR media")
+        ] = str(getattr(config, "DY_KEEP_MEDIA", False)),
         max_comments_count_singlenotes: Annotated[
-            int,
+            Optional[int],
             typer.Option(
                 "--max_comments_count_singlenotes",
                 help="Maximum number of first-level comments to crawl per post/video",
                 rich_help_panel="Comment Configuration",
             ),
-        ] = config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
+        ] = None,
         crawler_max_notes_count: Annotated[
             int,
             typer.Option(
@@ -341,6 +370,18 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         enable_ip_proxy_value = _to_bool(enable_ip_proxy)
         init_db_value = init_db.value if init_db else None
 
+        if crawler_type == CrawlerTypeEnum.TOPIC and platform != PlatformEnum.DOUYIN:
+            raise typer.BadParameter("topic mode is only supported for --platform dy")
+        if crawler_type == CrawlerTypeEnum.TOPIC and not topics.strip():
+            raise typer.BadParameter("--topics is required in Douyin topic mode")
+        resolved_max_comments = (
+            max_comments_count_singlenotes
+            if max_comments_count_singlenotes is not None
+            else (0 if platform == PlatformEnum.DOUYIN else config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES)
+        )
+        if resolved_max_comments < 0:
+            raise typer.BadParameter("--max_comments_count_singlenotes must be 0 or greater")
+
         # Parse specified_id and creator_id into lists
         specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []
         creator_id_list = [id.strip() for id in creator_id.split(",") if id.strip()] if creator_id else []
@@ -357,7 +398,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.CDP_HEADLESS = enable_headless
         config.SAVE_DATA_OPTION = save_data_option.value
         config.COOKIES = cookies
-        config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = max_comments_count_singlenotes
+        config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = resolved_max_comments
         config.CRAWLER_MAX_NOTES_COUNT = crawler_max_notes_count
         config.MAX_CONCURRENCY_NUM = max_concurrency_num
         config.SAVE_DATA_PATH = save_data_path
@@ -365,6 +406,17 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.IP_PROXY_POOL_COUNT = ip_proxy_pool_count
         config.IP_PROXY_PROVIDER_NAME = ip_proxy_provider_name
         config.STATIC_PROXY_URL = static_proxy_url
+
+        if platform == PlatformEnum.DOUYIN:
+            config.DY_TOPICS = topics
+            config.DY_ENABLE_CREATOR_PROFILE = _to_bool(enable_creator_profile)
+            config.DY_FORCE_CREATOR_REFRESH = _to_bool(force_creator_refresh)
+            config.DY_ENABLE_ASR = _to_bool(enable_asr)
+            config.DY_ENABLE_NATIVE_SUBTITLE = _to_bool(enable_native_subtitle) or config.DY_ENABLE_ASR
+            config.DY_ASR_MODEL = asr_model
+            config.DY_ASR_LANGUAGE = asr_language
+            config.DY_SAVE_RAW_PAYLOAD = _to_bool(save_raw_payload)
+            config.DY_KEEP_MEDIA = _to_bool(keep_media)
 
         # Set platform-specific ID lists for detail/creator mode
         if specified_id_list:
@@ -415,6 +467,7 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             cookies=config.COOKIES,
             specified_id=specified_id,
             creator_id=creator_id,
+            topics=topics,
         )
 
     command = typer.main.get_command(app)

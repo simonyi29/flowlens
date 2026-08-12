@@ -114,7 +114,13 @@ class CrawlerManager:
             cmd = self._build_command(config)
 
             # Log start information
-            entry = self._create_log_entry(f"Starting crawler: {' '.join(cmd)}", "info")
+            safe_cmd = list(cmd)
+            for sensitive_flag in ("--cookies", "--static_proxy_url"):
+                if sensitive_flag in safe_cmd:
+                    value_index = safe_cmd.index(sensitive_flag) + 1
+                    if value_index < len(safe_cmd):
+                        safe_cmd[value_index] = "***"
+            entry = self._create_log_entry(f"Starting crawler: {' '.join(safe_cmd)}", "info")
             await self._push_log(entry)
 
             try:
@@ -218,6 +224,8 @@ class CrawlerManager:
             cmd.extend(["--specified_id", config.specified_ids])
         elif config.crawler_type.value == "creator" and config.creator_ids:
             cmd.extend(["--creator_id", config.creator_ids])
+        elif config.crawler_type.value == "topic" and config.topics:
+            cmd.extend(["--topics", config.topics])
 
         if config.start_page != 1:
             cmd.extend(["--start", str(config.start_page)])
@@ -234,7 +242,28 @@ class CrawlerManager:
         if config.cookies:
             cmd.extend(["--cookies", config.cookies])
 
+        if config.platform.value == "dy":
+            douyin_flags = {
+                "--enable_creator_profile": config.enable_creator_profile,
+                "--force_creator_refresh": config.force_creator_refresh,
+                "--enable_native_subtitle": config.enable_native_subtitle,
+                "--enable_asr": config.enable_asr,
+                "--save_raw_payload": config.save_raw_payload,
+                "--keep_media": config.keep_media,
+            }
+            for flag, value in douyin_flags.items():
+                if value is not None:
+                    cmd.extend([flag, "true" if value else "false"])
+            if config.asr_model is not None:
+                cmd.extend(["--asr_model", config.asr_model])
+            if config.asr_language is not None:
+                cmd.extend(["--asr_language", config.asr_language])
+
         cmd.extend(["--headless", "true" if config.headless else "false"])
+        cmd.extend(["--enable_ip_proxy", "true" if config.enable_ip_proxy else "false"])
+        if config.enable_ip_proxy and config.static_proxy_url:
+            cmd.extend(["--ip_proxy_provider_name", "static"])
+            cmd.extend(["--static_proxy_url", config.static_proxy_url])
 
         return cmd
 

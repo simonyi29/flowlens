@@ -1,0 +1,20 @@
+FlowLens (流镜)
+Copyright (c) 2026 simonyi29 <zhang19960502@gmail.com>
+
+FlowLens is a derivative work based on MediaCrawler:
+https://github.com/NanmiCoder/MediaCrawler
+
+Upstream MediaCrawler copyright:
+Copyright (c) 2024 relakkes@gmail.com
+
+The upstream NON-COMMERCIAL LEARNING LICENSE 1.1 remains applicable to this
+repository and its derivative modifications. Original copyright notices and
+source-file attribution are intentionally retained. FlowLens branding does not
+claim authorship of the upstream code or erase its contribution history.
+
+FlowLens-specific changes are maintained at:
+https://github.com/simonyi29/flowlens
+
+流镜（FlowLens）是基于 MediaCrawler 演进的衍生项目。上游版权声明、贡献历史及
+《非商业学习使用许可证 1.1》继续有效。项目品牌变更不表示对上游代码的原创主张。
+FlowLens 新增改动由 simonyi29 维护。

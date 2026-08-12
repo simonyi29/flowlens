@@ -20,6 +20,7 @@
 import asyncio
 import os
 import random
+import uuid
 from asyncio import Task
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,12 +38,27 @@ from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import douyin as douyin_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
-from var import crawler_type_var, source_keyword_var
+from tools.user_hash import anonymize_user_id
+from database.douyin_state import load_checkpoint, save_checkpoint
+from model.m_douyin import DouyinCrawlCheckpoint, DouyinTopic
+from var import (
+    crawl_run_id_var,
+    crawler_type_var,
+    request_keyword_var,
+    source_keyword_var,
+    source_topic_var,
+)
 
 from .client import DouYinClient
 from .exception import DataFetchError
 from .field import PublishTimeType
-from .help import parse_video_info_from_url, parse_creator_info_from_url
+from .help import (
+    parse_creator_info_from_url,
+    parse_topic_id_from_url,
+    parse_video_info_from_url,
+)
+from .normalizer import optional_int, sanitize_raw_payload
+from .transcript import DouyinTranscriptService
 from .login import DouYinLogin
 
 
@@ -63,8 +79,14 @@ class DouYinCrawler(AbstractCrawler):
         ]
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
+        self.seen_aweme_ids: set[str] = set()
+        self.seen_creator_ids: set[str] = set()
+        self.transcript_service: Optional[DouyinTranscriptService] = None
 
     async def start(self) -> None:
+        crawl_run_id_var.set(uuid.uuid4().hex)
+        source_keyword_var.set("")
+        source_topic_var.set("")
         playwright_proxy_format, httpx_proxy_format = None, None
         if config.ENABLE_IP_PROXY:
             self.ip_proxy_pool = await create_ip_pool(config.IP_PROXY_POOL_COUNT, enable_validate_ip=True)
@@ -98,6 +120,9 @@ class DouYinCrawler(AbstractCrawler):
             await self.context_page.goto(self.index_url)
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
+            if getattr(config, "DY_ENABLE_NATIVE_SUBTITLE", True) or getattr(config, "DY_ENABLE_ASR", True):
+                self.transcript_service = DouyinTranscriptService(self.dy_client.get_aweme_media)
+                await self.transcript_service.start()
             if not await self.dy_client.pong(browser_context=self.browser_context):
                 login_obj = DouYinLogin(
                     login_type=config.LOGIN_TYPE,
@@ -112,73 +137,294 @@ class DouYinCrawler(AbstractCrawler):
                     urls=self.cookie_urls,
                 )
             crawler_type_var.set(config.CRAWLER_TYPE)
-            if config.CRAWLER_TYPE == "search":
-                # Search for notes and retrieve their comment information.
-                await self.search()
-            elif config.CRAWLER_TYPE == "detail":
-                # Get the information and comments of the specified post
-                await self.get_specified_awemes()
-            elif config.CRAWLER_TYPE == "creator":
-                # Get the information and comments of the specified creator
-                await self.get_creators_and_videos()
+            try:
+                if config.CRAWLER_TYPE == "search":
+                    await self.search()
+                elif config.CRAWLER_TYPE == "detail":
+                    await self.get_specified_awemes()
+                elif config.CRAWLER_TYPE == "creator":
+                    await self.get_creators_and_videos()
+                elif config.CRAWLER_TYPE == "topic":
+                    await self.search_topics()
+            finally:
+                if self.transcript_service:
+                    await self.transcript_service.drain_and_close()
 
             utils.logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
 
     async def search(self) -> None:
         utils.logger.info("[DouYinCrawler.search] Begin search douyin keywords")
-        dy_limit_count = 10  # douyin limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
-        start_page = config.START_PAGE  # start page number
+        page_size = 15
+        max_count = config.CRAWLER_MAX_NOTES_COUNT
+        start_page = max(1, config.START_PAGE)
         for keyword in config.KEYWORDS.split(","):
+            keyword = keyword.strip()
+            if not keyword:
+                continue
             source_keyword_var.set(keyword)
+            request_keyword_var.set(keyword)
+            source_topic_var.set("")
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
             aweme_list: List[str] = []
-            page = 0
-            dy_search_id = ""
-            while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
-                if page < start_page:
-                    utils.logger.info(f"[DouYinCrawler.search] Skip {page}")
-                    page += 1
-                    continue
+            checkpoint = await load_checkpoint("search", keyword)
+            page = start_page
+            collected = 0
+            if checkpoint and checkpoint.status in {"partial", "failed", "running"}:
+                collected = checkpoint.collected_count
                 try:
-                    utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page}")
-                    posts_res = await self.dy_client.search_info_by_keyword(
-                        keyword=keyword,
-                        offset=page * dy_limit_count - dy_limit_count,
-                        publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
-                        search_id=dy_search_id,
-                    )
-                    if posts_res.get("data") is None or posts_res.get("data") == []:
-                        utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
+                    page = max(start_page, int(checkpoint.cursor))
+                except ValueError:
+                    page = start_page
+            dy_search_id = ""
+            while collected < max_count:
+                posts_res = None
+                for attempt in range(3):
+                    try:
+                        utils.logger.info(
+                            f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page}"
+                        )
+                        posts_res = await self.dy_client.search_info_by_keyword(
+                            keyword=keyword,
+                            offset=(page - 1) * page_size,
+                            publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
+                            search_id=dy_search_id,
+                            count=page_size,
+                        )
                         break
-                except DataFetchError:
-                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed")
+                    except DataFetchError as exc:
+                        if attempt == 2:
+                            await save_checkpoint(
+                                DouyinCrawlCheckpoint(
+                                    scope="search",
+                                    scope_id=keyword,
+                                    cursor=str(page),
+                                    status="partial" if collected else "failed",
+                                    collected_count=collected,
+                                    last_error=str(exc),
+                                    updated_at=utils.get_current_timestamp(),
+                                )
+                            )
+                            utils.logger.error(
+                                f"[DouYinCrawler.search] keyword {keyword} failed after retries"
+                            )
+                            break
+                        await asyncio.sleep(2 ** attempt)
+                if posts_res is None:
                     break
-
-                page += 1
+                if not posts_res.get("data"):
+                    utils.logger.info(
+                        f"[DouYinCrawler.search] keyword {keyword}, page {page} is empty"
+                    )
+                    await save_checkpoint(
+                        DouyinCrawlCheckpoint(
+                            scope="search",
+                            scope_id=keyword,
+                            cursor=str(page),
+                            status="complete",
+                            collected_count=collected,
+                            updated_at=utils.get_current_timestamp(),
+                        )
+                    )
+                    break
                 if "data" not in posts_res:
                     utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed，账号也许被风控了。")
                     break
                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
-                page_aweme_list = []
+                page_aweme_list: List[str] = []
                 for post_item in posts_res.get("data"):
                     try:
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
-                    except TypeError:
+                    except (IndexError, TypeError):
                         continue
-                    aweme_list.append(aweme_info.get("aweme_id", ""))
-                    page_aweme_list.append(aweme_info.get("aweme_id", ""))
-                    await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
-                    await self.get_aweme_media(aweme_item=aweme_info)
-                
-                # Batch get note comments for the current page
-                await self.batch_get_note_comments(page_aweme_list)
+                    aweme_id = str(aweme_info.get("aweme_id") or "")
+                    if not aweme_id or aweme_id in self.seen_aweme_ids:
+                        continue
+                    self.seen_aweme_ids.add(aweme_id)
+                    page_aweme_list.append(aweme_id)
+                    aweme_list.append(aweme_id)
+                    collected += 1
+                    if collected >= max_count:
+                        break
 
-                # Sleep after each page navigation
+                semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+                detail_tasks = [
+                    self.get_aweme_detail(aweme_id, semaphore)
+                    for aweme_id in page_aweme_list
+                ]
+                details = await asyncio.gather(*detail_tasks) if detail_tasks else []
+                successful_ids: List[str] = []
+                for detail in details:
+                    if detail:
+                        await self.process_aweme_detail(detail)
+                        successful_ids.append(str(detail.get("aweme_id") or ""))
+
+                await self.batch_get_note_comments([item for item in successful_ids if item])
+                page += 1
+                await save_checkpoint(
+                    DouyinCrawlCheckpoint(
+                        scope="search",
+                        scope_id=keyword,
+                        cursor=str(page),
+                        status="complete" if collected >= max_count else "running",
+                        collected_count=collected,
+                        updated_at=utils.get_current_timestamp(),
+                    )
+                )
+
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
             utils.logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
+
+    async def process_aweme_detail(self, aweme_item: Dict) -> None:
+        """Persist one full detail response and its related public creator data."""
+        await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
+        await self.get_aweme_media(aweme_item=aweme_item)
+        if self.transcript_service:
+            await self.transcript_service.enqueue(aweme_item)
+        author = aweme_item.get("author") or {}
+        sec_user_id = str(author.get("sec_uid") or "")
+        await self.fetch_creator_profile(sec_user_id)
+
+    async def fetch_creator_profile(self, sec_user_id: str) -> None:
+        if not getattr(config, "DY_ENABLE_CREATOR_PROFILE", True):
+            return
+        if not sec_user_id or sec_user_id in self.seen_creator_ids:
+            return
+        self.seen_creator_ids.add(sec_user_id)
+        checkpoint_id = anonymize_user_id(sec_user_id)
+        checkpoint = await load_checkpoint("creator_profile", checkpoint_id)
+        refresh_ms = int(getattr(config, "DY_CREATOR_REFRESH_INTERVAL_SEC", 86400) * 1000)
+        if (
+            checkpoint and checkpoint.status == "complete"
+            and not getattr(config, "DY_FORCE_CREATOR_REFRESH", False)
+            and utils.get_current_timestamp() - checkpoint.updated_at < refresh_ms
+        ):
+            return
+        try:
+            creator_info = await self.dy_client.get_user_info(sec_user_id)
+            if creator_info:
+                await douyin_store.save_creator(sec_user_id, creator_info)
+                await save_checkpoint(
+                    DouyinCrawlCheckpoint(
+                        scope="creator_profile", scope_id=checkpoint_id, status="complete",
+                        collected_count=1, updated_at=utils.get_current_timestamp(),
+                    )
+                )
+        except DataFetchError as exc:
+            utils.logger.warning(
+                f"[DouYinCrawler.process_aweme_detail] creator profile unavailable: {exc}"
+            )
+
+    async def resolve_topic(self, value: str) -> tuple[str, str]:
+        try:
+            return parse_topic_id_from_url(value), ""
+        except ValueError:
+            discovered = await self.dy_client.discover_topic(value)
+            return str(discovered["topic_id"]), str(discovered.get("name") or value)
+
+    async def search_topics(self) -> None:
+        values = [item.strip() for item in config.DY_TOPICS.split(",") if item.strip()]
+        for value in values:
+            source_keyword_var.set("")
+            try:
+                topic_id, discovered_name = await self.resolve_topic(value)
+                detail_response = await self.dy_client.get_topic_detail(topic_id)
+            except Exception as exc:
+                await save_checkpoint(
+                    DouyinCrawlCheckpoint(
+                        scope="topic_resolution", scope_id=value, status="failed",
+                        last_error=f"{type(exc).__name__}: {exc}",
+                        updated_at=utils.get_current_timestamp(),
+                    )
+                )
+                utils.logger.error(
+                    f"[DouYinCrawler.search_topics] topic '{value}' could not be resolved: {exc}"
+                )
+                continue
+            detail = (
+                detail_response.get("ch_info")
+                or detail_response.get("challenge_info")
+                or detail_response.get("cha_info")
+                or {}
+            )
+            topic_name = str(detail.get("cha_name") or detail.get("name") or discovered_name)
+            source_topic_var.set(topic_name or topic_id)
+            raw_payload = (
+                sanitize_raw_payload(detail_response)
+                if getattr(config, "DY_SAVE_RAW_PAYLOAD", False)
+                else None
+            )
+            await douyin_store.save_topic(
+                DouyinTopic(
+                    topic_id=topic_id,
+                    name=topic_name,
+                    topic_url=f"https://www.douyin.com/challenge/{topic_id}",
+                    view_count=optional_int(detail.get("view_count")),
+                    aweme_count=optional_int(detail.get("user_count") or detail.get("aweme_count")),
+                    crawl_run_id=crawl_run_id_var.get(),
+                    collected_at=utils.get_current_timestamp(),
+                    raw_payload=raw_payload,
+                )
+            )
+
+            checkpoint = await load_checkpoint("topic", topic_id)
+            cursor = int(checkpoint.cursor) if checkpoint and checkpoint.status != "complete" else 0
+            collected = checkpoint.collected_count if checkpoint and checkpoint.status != "complete" else 0
+            max_count = config.CRAWLER_MAX_NOTES_COUNT
+            while collected < max_count:
+                try:
+                    response = await self.dy_client.get_topic_awemes(
+                        topic_id, cursor=cursor, count=min(20, max_count - collected)
+                    )
+                except Exception as exc:
+                    await save_checkpoint(
+                        DouyinCrawlCheckpoint(
+                            scope="topic", scope_id=topic_id, cursor=str(cursor),
+                            status="partial" if collected else "failed",
+                            collected_count=collected,
+                            last_error=f"{type(exc).__name__}: {exc}",
+                            updated_at=utils.get_current_timestamp(),
+                        )
+                    )
+                    utils.logger.error(
+                        f"[DouYinCrawler.search_topics] true topic endpoint failed for {topic_id}: {exc}"
+                    )
+                    break
+                awemes = response.get("aweme_list") or []
+                page_ids = []
+                for item in awemes:
+                    aweme_id = str(item.get("aweme_id") or "")
+                    if not aweme_id or aweme_id in self.seen_aweme_ids:
+                        continue
+                    self.seen_aweme_ids.add(aweme_id)
+                    page_ids.append(aweme_id)
+                    collected += 1
+                    if collected >= max_count:
+                        break
+                semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
+                details = await asyncio.gather(
+                    *[self.get_aweme_detail(item, semaphore) for item in page_ids]
+                ) if page_ids else []
+                successful = []
+                for item in details:
+                    if item:
+                        await self.process_aweme_detail(item)
+                        successful.append(str(item.get("aweme_id") or ""))
+                await self.batch_get_note_comments([item for item in successful if item])
+                has_more = bool(response.get("has_more"))
+                next_cursor = int(response.get("cursor") or response.get("max_cursor") or cursor)
+                status = "running" if has_more and collected < max_count else "complete"
+                await save_checkpoint(
+                    DouyinCrawlCheckpoint(
+                        scope="topic", scope_id=topic_id, cursor=str(next_cursor),
+                        status=status, collected_count=collected,
+                        updated_at=utils.get_current_timestamp(),
+                    )
+                )
+                if status == "complete" or not awemes or next_cursor == cursor:
+                    break
+                cursor = next_cursor
+                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
 
     async def get_specified_awemes(self):
         """Get the information and comments of the specified post from URLs or IDs"""
@@ -200,7 +446,8 @@ class DouYinCrawler(AbstractCrawler):
                         utils.logger.error(f"[DouYinCrawler.get_specified_awemes] Failed to resolve short link: {video_url}")
                         continue
 
-                aweme_id_list.append(video_info.aweme_id)
+                if video_info.aweme_id not in aweme_id_list:
+                    aweme_id_list.append(video_info.aweme_id)
                 utils.logger.info(f"[DouYinCrawler.get_specified_awemes] Parsed aweme ID: {video_info.aweme_id} from {video_url}")
             except ValueError as e:
                 utils.logger.error(f"[DouYinCrawler.get_specified_awemes] Failed to parse video URL: {e}")
@@ -211,8 +458,7 @@ class DouYinCrawler(AbstractCrawler):
         aweme_details = await asyncio.gather(*task_list)
         for aweme_detail in aweme_details:
             if aweme_detail is not None:
-                await douyin_store.update_douyin_aweme(aweme_item=aweme_detail)
-                await self.get_aweme_media(aweme_item=aweme_detail)
+                await self.process_aweme_detail(aweme_detail)
         await self.batch_get_note_comments(aweme_id_list)
 
     async def get_aweme_detail(self, aweme_id: str, semaphore: asyncio.Semaphore) -> Any:
@@ -245,7 +491,7 @@ class DouYinCrawler(AbstractCrawler):
             task = asyncio.create_task(self.get_comments(aweme_id, semaphore), name=aweme_id)
             task_list.append(task)
         if len(task_list) > 0:
-            await asyncio.wait(task_list)
+            await asyncio.gather(*task_list)
 
     async def get_comments(self, aweme_id: str, semaphore: asyncio.Semaphore) -> None:
         async with semaphore:
@@ -264,7 +510,7 @@ class DouYinCrawler(AbstractCrawler):
                 await asyncio.sleep(crawl_interval)
                 utils.logger.info(f"[DouYinCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for aweme {aweme_id}")
                 utils.logger.info(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments have all been obtained and filtered ...")
-            except DataFetchError as e:
+            except Exception as e:
                 utils.logger.error(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} get comments failed, error: {e}")
 
     async def get_creators_and_videos(self) -> None:
@@ -283,9 +529,7 @@ class DouYinCrawler(AbstractCrawler):
                 utils.logger.error(f"[DouYinCrawler.get_creators_and_videos] Failed to parse creator URL: {e}")
                 continue
 
-            creator_info: Dict = await self.dy_client.get_user_info(user_id)
-            if creator_info:
-                await douyin_store.save_creator(user_id, creator=creator_info)
+            await self.fetch_creator_profile(user_id)
 
             # Get all video information of the creator
             all_video_list = await self.dy_client.get_all_user_aweme_posts(sec_user_id=user_id, callback=self.fetch_creator_video_detail)
@@ -303,8 +547,7 @@ class DouYinCrawler(AbstractCrawler):
         note_details = await asyncio.gather(*task_list)
         for aweme_item in note_details:
             if aweme_item is not None:
-                await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
-                await self.get_aweme_media(aweme_item=aweme_item)
+                await self.process_aweme_detail(aweme_item)
 
     async def create_douyin_client(self, httpx_proxy: Optional[str]) -> DouYinClient:
         """Create douyin client"""

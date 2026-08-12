@@ -45,6 +45,9 @@ def get_file_info(file_path: Path) -> dict:
         elif file_path.suffix == ".csv":
             with open(file_path, "r", encoding="utf-8") as f:
                 record_count = sum(1 for _ in f) - 1  # Subtract header row
+        elif file_path.suffix == ".jsonl":
+            with open(file_path, "r", encoding="utf-8") as f:
+                record_count = sum(1 for line in f if line.strip())
     except Exception:
         pass
 
@@ -65,7 +68,7 @@ async def list_data_files(platform: Optional[str] = None, file_type: Optional[st
         return {"files": []}
 
     files = []
-    supported_extensions = {".json", ".csv", ".xlsx", ".xls"}
+    supported_extensions = {".json", ".jsonl", ".csv", ".xlsx", ".xls", ".sqlite", ".db"}
 
     for root, dirs, filenames in os.walk(DATA_DIR):
         root_path = Path(root)
@@ -121,6 +124,24 @@ async def get_file_content(file_path: str, preview: bool = True, limit: int = 10
                     if isinstance(data, list):
                         return {"data": data[:limit], "total": len(data)}
                     return {"data": data, "total": 1}
+            elif full_path.suffix == ".jsonl":
+                rows = []
+                total = 0
+                with open(full_path, "r", encoding="utf-8") as f:
+                    for line_number, line in enumerate(f, 1):
+                        if not line.strip():
+                            continue
+                        total += 1
+                        try:
+                            item = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Invalid JSONL at line {line_number}: {exc.msg}",
+                            ) from exc
+                        if len(rows) < limit:
+                            rows.append(item)
+                return {"data": rows, "total": total}
             elif full_path.suffix == ".csv":
                 import csv
                 with open(full_path, "r", encoding="utf-8") as f:
@@ -152,6 +173,8 @@ async def get_file_content(file_path: str, preview: bool = True, limit: int = 10
                 raise HTTPException(status_code=400, detail="Unsupported file type for preview")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON file")
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     else:
@@ -200,7 +223,7 @@ async def get_data_stats():
         "by_type": {}
     }
 
-    supported_extensions = {".json", ".csv", ".xlsx", ".xls"}
+    supported_extensions = {".json", ".jsonl", ".csv", ".xlsx", ".xls", ".sqlite", ".db"}
 
     for root, dirs, filenames in os.walk(DATA_DIR):
         root_path = Path(root)

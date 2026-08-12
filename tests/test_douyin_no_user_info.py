@@ -211,10 +211,10 @@ def test_douyin_aweme_masks_user_info():
     assert captured.get("music_download_url") == "http://x/music.mp3"
     assert "http://x/note_img1.jpg" in captured.get("note_download_url", "")
     # 7. 互动数据拍平
-    assert captured.get("liked_count") == "100"
-    assert captured.get("collected_count") == "5"
-    assert captured.get("comment_count") == "20"
-    assert captured.get("share_count") == "3"
+    assert captured.get("liked_count") == 100
+    assert captured.get("collected_count") == 5
+    assert captured.get("comment_count") == 20
+    assert captured.get("share_count") == 3
     assert captured.get("aweme_url") == f"https://www.douyin.com/video/{aweme['aweme_id']}"
 
 
@@ -258,9 +258,9 @@ def test_douyin_comment_masks_user_info():
     assert captured.get("comment_id") == comment["cid"]
     assert captured.get("aweme_id") == aweme_id
     assert captured.get("parent_comment_id") == "0"
-    assert captured.get("sub_comment_count") == "2"
+    assert captured.get("sub_comment_count") == 2
     # 评论图片提取
-    assert captured.get("pictures") == "http://x/cimg.jpg"
+    assert captured.get("pictures") == ["http://x/cimg.jpg"]
 
 
 def test_douyin_store_end_to_end_sqlite(monkeypatch):

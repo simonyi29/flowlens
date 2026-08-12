@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next'
-import { Sparkles, Heart } from 'lucide-react'
+import { Sparkles, Heart, Github } from 'lucide-react'
 
 export function AuthorFooter() {
   const { t } = useTranslation('license')
@@ -10,8 +10,8 @@ export function AuthorFooter() {
         {/* Author Avatar */}
         <div className="w-14 h-14 rounded-lg overflow-hidden border-2 border-cyber-neon-cyan/60 flex-shrink-0 shadow-glow-cyan-sm">
           <img
-            src="/logos/my_logo.png"
-            alt="程序员阿江-Relakkes"
+            src="/logos/flowlens-logo.png"
+            alt="流镜 FlowLens"
             className="w-full h-full object-cover"
           />
         </div>
@@ -38,40 +38,22 @@ export function AuthorFooter() {
         {/* Social Links */}
         <div className="flex items-center gap-3">
           <a
-            href="https://github.com/NanmiCoder"
+            href="https://github.com/simonyi29"
             target="_blank"
             rel="noopener noreferrer"
             className="w-11 h-11 rounded-lg flex items-center justify-center border border-cyber-border-subtle hover:border-cyber-neon-cyan hover:shadow-glow-cyan-sm transition-all bg-cyber-bg-tertiary hover:scale-110"
             title="GitHub"
           >
-            <img src="/logos/github.png" alt="GitHub" className="w-6 h-6 object-contain" />
+            <Github className="w-6 h-6" />
           </a>
           <a
-            href="https://space.bilibili.com/434377496"
+            href="https://github.com/NanmiCoder/MediaCrawler"
             target="_blank"
             rel="noopener noreferrer"
             className="w-11 h-11 rounded-lg flex items-center justify-center border border-cyber-border-subtle hover:border-pink-400 hover:shadow-[0_0_10px_rgba(251,113,133,0.4)] transition-all bg-cyber-bg-tertiary hover:scale-110"
-            title="哔哩哔哩"
+            title="MediaCrawler upstream"
           >
-            <img src="/logos/bilibili_logo.png" alt="Bilibili" className="w-6 h-6 object-contain" />
-          </a>
-          <a
-            href="https://www.xiaohongshu.com/user/profile/5f58bd990000000001003753"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-11 h-11 rounded-lg flex items-center justify-center border border-cyber-border-subtle hover:border-red-400 hover:shadow-[0_0_10px_rgba(248,113,113,0.4)] transition-all bg-cyber-bg-tertiary hover:scale-110"
-            title="小红书"
-          >
-            <img src="/logos/xiaohongshu_logo.png" alt="小红书" className="w-6 h-6 object-contain" />
-          </a>
-          <a
-            href="https://www.douyin.com/user/MS4wLjABAAAATJPY7LAlaa5X-c8uNdWkvz0jUGgpw4eeXIwu_8BhvqE"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-11 h-11 rounded-lg flex items-center justify-center border border-cyber-border-subtle hover:border-cyber-text-primary hover:shadow-[0_0_10px_rgba(255,255,255,0.3)] transition-all bg-cyber-bg-tertiary hover:scale-110"
-            title="抖音"
-          >
-            <img src="/logos/douyin.png" alt="抖音" className="w-6 h-6 object-contain" />
+            <Github className="w-6 h-6" />
           </a>
         </div>
       </div>

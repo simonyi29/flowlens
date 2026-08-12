@@ -18,7 +18,7 @@
 
 from enum import Enum
 from typing import Optional, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 MAX_API_LIMIT_COUNT = 10000
@@ -47,6 +47,7 @@ class CrawlerTypeEnum(str, Enum):
     SEARCH = "search"
     DETAIL = "detail"
     CREATOR = "creator"
+    TOPIC = "topic"
 
 
 class SaveDataOptionEnum(str, Enum):
@@ -68,6 +69,7 @@ class CrawlerStartRequest(BaseModel):
     keywords: str = ""  # Keywords for search mode
     specified_ids: str = ""  # Post/video ID list for detail mode, comma-separated
     creator_ids: str = ""  # Creator ID list for creator mode, comma-separated
+    topics: str = ""
     start_page: int = 1
     enable_comments: bool = True
     enable_sub_comments: bool = False
@@ -75,7 +77,35 @@ class CrawlerStartRequest(BaseModel):
     cookies: str = ""
     headless: bool = False
     max_notes_count: Optional[int] = Field(default=None, ge=1, le=MAX_API_LIMIT_COUNT)
-    max_comments_count: Optional[int] = Field(default=None, ge=1, le=MAX_API_LIMIT_COUNT)
+    max_comments_count: Optional[int] = Field(default=None, ge=0, le=MAX_API_LIMIT_COUNT)
+    enable_creator_profile: Optional[bool] = None
+    force_creator_refresh: Optional[bool] = None
+    enable_native_subtitle: Optional[bool] = None
+    enable_asr: Optional[bool] = None
+    asr_model: Optional[str] = None
+    asr_language: Optional[str] = None
+    save_raw_payload: Optional[bool] = None
+    keep_media: Optional[bool] = None
+    enable_ip_proxy: bool = False
+    static_proxy_url: str = ""
+
+    @model_validator(mode="after")
+    def validate_douyin_options(self):
+        if self.crawler_type == CrawlerTypeEnum.TOPIC:
+            if self.platform != PlatformEnum.DOUYIN:
+                raise ValueError("topic mode is only supported for Douyin")
+            if not self.topics.strip():
+                raise ValueError("topics is required in Douyin topic mode")
+        douyin_values = (
+            self.topics.strip(), self.enable_creator_profile, self.force_creator_refresh,
+            self.enable_native_subtitle, self.enable_asr, self.asr_model,
+            self.asr_language, self.save_raw_payload, self.keep_media,
+        )
+        if self.platform != PlatformEnum.DOUYIN and any(value not in (None, "") for value in douyin_values):
+            raise ValueError("Douyin-specific options require platform=dy")
+        if self.platform == PlatformEnum.DOUYIN and self.enable_asr:
+            self.enable_native_subtitle = True
+        return self
 
 
 class CrawlerStatusResponse(BaseModel):

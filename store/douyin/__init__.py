@@ -21,11 +21,22 @@
 # @Author  : relakkes@gmail.com
 # @Time    : 2024/1/14 18:46
 # @Desc    :
-from typing import List
+from typing import Dict, List
 
 import config
-from var import source_keyword_var
-from tools.user_hash import anonymize_user_id, mask_nickname
+from media_platform.douyin.normalizer import (
+    normalize_aweme,
+    normalize_comment,
+    normalize_creator,
+)
+from model.m_douyin import (
+    DouyinAwemeMetricSnapshot as DouyinAwemeMetricSnapshotData,
+    DouyinCreatorMetricSnapshot as DouyinCreatorMetricSnapshotData,
+    DouyinTopic as DouyinTopicData,
+    DouyinTranscript as DouyinTranscriptData,
+)
+from tools import utils
+from var import crawler_type_var
 
 from ._store_impl import *
 from .douyin_store_media import *
@@ -156,38 +167,35 @@ def _extract_music_download_url(aweme_detail: Dict) -> str:
 
 
 async def update_douyin_aweme(aweme_item: Dict):
-    aweme_id = aweme_item.get("aweme_id")
-    user_info = aweme_item.get("author", {})
-    interact_info = aweme_item.get("statistics", {})
-    save_content_item = {
-        "aweme_id": aweme_id,
-        "aweme_type": str(aweme_item.get("aweme_type")),
-        "title": aweme_item.get("desc", ""),
-        "desc": aweme_item.get("desc", ""),
-        "create_time": aweme_item.get("create_time"),
-        "creator_hash": anonymize_user_id(user_info.get("uid")),  # 创作者匿名哈希(不存原始 uid)
-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
-        "liked_count": str(interact_info.get("digg_count")),
-        "collected_count": str(interact_info.get("collect_count")),
-        "comment_count": str(interact_info.get("comment_count")),
-        "share_count": str(interact_info.get("share_count")),
-        "last_modify_ts": utils.get_current_timestamp(),
-        "aweme_url": f"https://www.douyin.com/video/{aweme_id}",
-        "cover_url": _extract_content_cover_url(aweme_item),
-        "video_download_url": _extract_video_download_url(aweme_item),
-        "music_download_url": _extract_music_download_url(aweme_item),
-        "note_download_url": ",".join(_extract_note_image_list(aweme_item)),
-        "source_keyword": source_keyword_var.get(),
-    }
+    normalized = normalize_aweme(aweme_item)
+    save_content_item = normalized.model_dump(mode="json")
+    save_content_item["last_modify_ts"] = utils.get_current_timestamp()
+    aweme_id = normalized.aweme_id
     utils.logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_id}, title:{save_content_item.get('title')}")
-    await DouyinStoreFactory.create_store().store_content(content_item=save_content_item)
+    store = DouyinStoreFactory.create_store()
+    await store.store_content(content_item=save_content_item)
+    if hasattr(store, "store_aweme_metric"):
+        metric = DouyinAwemeMetricSnapshotData(
+            aweme_id=aweme_id,
+            liked_count=normalized.liked_count,
+            collected_count=normalized.collected_count,
+            comment_count=normalized.comment_count,
+            share_count=normalized.share_count,
+            play_count=normalized.play_count,
+            observed_at=normalized.collected_at,
+            crawl_run_id=normalized.crawl_run_id,
+            source_mode=crawler_type_var.get(),
+        )
+        await store.store_aweme_metric(metric.model_dump())
 
 
 async def batch_update_dy_aweme_comments(aweme_id: str, comments: List[Dict]):
     if not comments:
         return
     for comment_item in comments:
-        await update_dy_aweme_comment(aweme_id, comment_item)
+        normalized_item = dict(comment_item)
+        normalized_item.setdefault("aweme_id", aweme_id)
+        await update_dy_aweme_comment(aweme_id, normalized_item)
 
 
 async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
@@ -195,30 +203,49 @@ async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
     if aweme_id != comment_aweme_id:
         utils.logger.error(f"[store.douyin.update_dy_aweme_comment] comment_aweme_id: {comment_aweme_id} != aweme_id: {aweme_id}")
         return
-    user_info = comment_item.get("user", {})
-    comment_id = comment_item.get("cid")
-    parent_comment_id = comment_item.get("reply_id", "0")
-    save_comment_item = {
-        "comment_id": comment_id,
-        "create_time": comment_item.get("create_time"),
-        "aweme_id": aweme_id,
-        "content": comment_item.get("text"),
-        "creator_hash": anonymize_user_id(user_info.get("uid")),  # 创作者匿名哈希(不存原始 uid)
-        "nickname": mask_nickname(user_info.get("nickname")),  # 用户昵称(已脱敏)
-        "sub_comment_count": str(comment_item.get("reply_comment_total", 0)),
-        "like_count": (comment_item.get("digg_count") if comment_item.get("digg_count") else 0),
-        "last_modify_ts": utils.get_current_timestamp(),
-        "parent_comment_id": parent_comment_id,
-        "pictures": ",".join(_extract_comment_image_list(comment_item)),
-    }
+    normalized = normalize_comment(aweme_id, comment_item)
+    comment_id = normalized.comment_id
+    save_comment_item = normalized.model_dump(mode="json")
+    save_comment_item["last_modify_ts"] = utils.get_current_timestamp()
     utils.logger.info(f"[store.douyin.update_dy_aweme_comment] douyin aweme comment: {comment_id}, content: {save_comment_item.get('content')}")
 
     await DouyinStoreFactory.create_store().store_comment(comment_item=save_comment_item)
 
 
 async def save_creator(user_id: str, creator: Dict):
-    # 教学版：创作者个人资料(昵称/性别/头像/签名/IP/粉丝数等)不再落库，防骚扰。
-    return
+    normalized = normalize_creator(creator)
+    if normalized is None:
+        utils.logger.warning("[store.douyin.save_creator] creator response has no usable id")
+        return
+    store = DouyinStoreFactory.create_store()
+    creator_item = normalized.model_dump(mode="json")
+    await store.store_creator(creator_item)
+    if hasattr(store, "store_creator_metric"):
+        metric = DouyinCreatorMetricSnapshotData(
+            creator_hash=normalized.creator_hash,
+            follower_count=normalized.follower_count,
+            following_count=normalized.following_count,
+            aweme_count=normalized.aweme_count,
+            total_favorited=normalized.total_favorited,
+            observed_at=normalized.collected_at,
+            crawl_run_id=normalized.crawl_run_id,
+            source_mode=crawler_type_var.get(),
+        )
+        await store.store_creator_metric(metric.model_dump())
+
+
+async def save_topic(topic: DouyinTopicData):
+    store = DouyinStoreFactory.create_store()
+    if not hasattr(store, "store_topic"):
+        raise ValueError("Douyin topic storage requires JSONL or SQLite")
+    await store.store_topic(topic.model_dump(mode="json"))
+
+
+async def save_transcript(transcript: DouyinTranscriptData):
+    store = DouyinStoreFactory.create_store()
+    if not hasattr(store, "store_transcript"):
+        raise ValueError("Douyin transcript storage requires JSONL or SQLite")
+    await store.store_transcript(transcript.model_dump(mode="json"))
 
 
 async def update_dy_aweme_image(aweme_id, pic_content, extension_file_name):

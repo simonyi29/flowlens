@@ -17,7 +17,7 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 """
-MediaCrawler WebUI API Server
+FlowLens WebUI API Server
 Start command: uvicorn api.main:app --port 8080 --reload
 Or: python -m api.main
 """
@@ -38,8 +38,8 @@ from .routers import crawler_router, data_router, websocket_router
 PROJECT_ROOT = Path(__file__).parent.parent
 
 app = FastAPI(
-    title="MediaCrawler WebUI API",
-    description="API for controlling MediaCrawler from WebUI",
+    title="FlowLens WebUI API",
+    description="API for controlling FlowLens from WebUI",
     version="1.0.0"
 )
 
@@ -73,7 +73,7 @@ async def serve_frontend():
     if os.path.exists(index_path):
         return FileResponse(index_path)
     return {
-        "message": "MediaCrawler WebUI API",
+        "message": "FlowLens WebUI API",
         "version": "1.0.0",
         "docs": "/docs",
         "note": "WebUI not found, please build it first: cd webui && npm run build"
@@ -87,7 +87,7 @@ async def health_check():
 
 @app.get("/api/env/check")
 async def check_environment():
-    """Check if MediaCrawler environment is configured correctly"""
+    """Check if the FlowLens environment is configured correctly."""
     try:
         # Run uv run main.py --help command to check environment
         # Use PROJECT_ROOT so it works regardless of where uvicorn was started
@@ -117,7 +117,7 @@ async def check_environment():
         if process.returncode == 0:
             return {
                 "success": True,
-                "message": "MediaCrawler environment configured correctly",
+                "message": "FlowLens environment configured correctly",
                 "output": stdout.decode("utf-8", errors="ignore")[:500]  # Truncate to first 500 characters
             }
         else:
@@ -175,6 +175,7 @@ async def get_config_options():
             {"value": "search", "label": "Search Mode"},
             {"value": "detail", "label": "Detail Mode"},
             {"value": "creator", "label": "Creator Mode"},
+            {"value": "topic", "label": "Douyin Topic Mode"},
         ],
         "save_options": [
             {"value": "jsonl", "label": "JSONL File"},

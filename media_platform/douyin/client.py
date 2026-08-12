@@ -30,6 +30,8 @@ from base.base_crawler import AbstractApiClient
 from proxy.proxy_mixin import ProxyRefreshMixin
 from tools import utils
 from tools.httpx_util import make_async_client
+from database.douyin_state import load_checkpoint, save_checkpoint
+from model.m_douyin import DouyinCrawlCheckpoint
 from var import request_keyword_var
 
 if TYPE_CHECKING:
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
 from .exception import *
 from .field import *
 from .help import *
+from .normalizer import optional_int
 
 
 class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
@@ -174,6 +177,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         sort_type: SearchSortType = SearchSortType.GENERAL,
         publish_time: PublishTimeType = PublishTimeType.UNLIMITED,
         search_id: str = "",
+        count: int = 15,
     ):
         """
         DouYin Web Search API
@@ -194,7 +198,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             'is_filter_search': '0',
             'from_group_id': '7378810571505847586',
             'offset': offset,
-            'count': '15',
+            'count': str(count),
             'need_filter_settings': '1',
             'list_type': 'multi',
             'search_id': search_id,
@@ -219,6 +223,38 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         del headers["Origin"]
         res = await self.get("/aweme/v1/web/aweme/detail/", params, headers)
         return res.get("aweme_detail", {})
+
+    async def discover_topic(self, topic_name: str) -> Dict:
+        """Resolve a topic name to a real challenge id using search metadata only."""
+        response = await self.search_info_by_keyword(
+            keyword=f"#{topic_name.lstrip('#')}", count=10
+        )
+        wanted = topic_name.lstrip("#").strip().casefold()
+        candidates = []
+        for entry in response.get("data") or []:
+            aweme = entry.get("aweme_info") or {}
+            for extra in aweme.get("text_extra") or []:
+                topic_id = str(extra.get("hashtag_id") or "")
+                name = str(extra.get("hashtag_name") or "")
+                if topic_id and name:
+                    candidates.append({"topic_id": topic_id, "name": name})
+        exact = [item for item in candidates if item["name"].casefold() == wanted]
+        if len({item["topic_id"] for item in exact}) == 1:
+            return exact[0]
+        raise DataFetchError(f"Unable to resolve a unique topic for {topic_name!r}")
+
+    async def get_topic_detail(self, topic_id: str) -> Dict:
+        return await self.get(
+            "/aweme/v1/web/challenge/detail/", {"ch_id": topic_id}
+        )
+
+    async def get_topic_awemes(
+        self, topic_id: str, cursor: int = 0, count: int = 20
+    ) -> Dict:
+        return await self.get(
+            "/aweme/v1/web/challenge/aweme/",
+            {"ch_id": topic_id, "cursor": cursor, "count": count},
+        )
 
     async def get_aweme_comments(self, aweme_id: str, cursor: int = 0):
         """get note comments
@@ -268,45 +304,143 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         :return: 评论列表
         """
         result = []
-        comments_has_more = 1
-        comments_cursor = 0
-        while comments_has_more and len(result) < max_count:
-            comments_res = await self.get_aweme_comments(aweme_id, comments_cursor)
-            comments_has_more = comments_res.get("has_more", 0)
-            comments_cursor = comments_res.get("cursor", 0)
-            comments = comments_res.get("comments", [])
-            if not comments:
-                continue
-            if len(result) + len(comments) > max_count:
-                comments = comments[:max_count - len(result)]
-            result.extend(comments)
-            if callback:  # If there is a callback function, execute the callback function
-                await callback(aweme_id, comments)
+        checkpoint = await load_checkpoint("comments", aweme_id)
+        if checkpoint and checkpoint.status == "complete":
+            return result
+        comments_cursor = int(checkpoint.cursor) if checkpoint else 0
+        collected_count = checkpoint.collected_count if checkpoint else 0
+        expected_count = checkpoint.expected_count if checkpoint else None
+        pending_items = list(checkpoint.pending_items) if checkpoint else []
+        comments_has_more = (
+            checkpoint.sub_cursor != "0"
+            if checkpoint and checkpoint.pending_items
+            else True
+        )
 
-            await asyncio.sleep(crawl_interval)
-            if not is_fetch_sub_comments:
-                continue
-            # Get secondary reviews
-            for comment in comments:
-                reply_comment_total = comment.get("reply_comment_total")
+        def remaining() -> Optional[int]:
+            return None if max_count == 0 else max(0, max_count - collected_count)
 
-                if reply_comment_total > 0:
-                    comment_id = comment.get("cid")
-                    sub_comments_has_more = 1
-                    sub_comments_cursor = 0
+        async def persist_parent(status: str = "running", error: str = "") -> None:
+            await save_checkpoint(
+                DouyinCrawlCheckpoint(
+                    scope="comments", scope_id=aweme_id,
+                    cursor=str(comments_cursor), sub_cursor="1" if comments_has_more else "0",
+                    status=status, expected_count=expected_count,
+                    collected_count=collected_count, last_error=error,
+                    pending_items=pending_items,
+                    updated_at=utils.get_current_timestamp(),
+                )
+            )
 
-                    while sub_comments_has_more:
-                        sub_comments_res = await self.get_sub_comments(aweme_id, comment_id, sub_comments_cursor)
-                        sub_comments_has_more = sub_comments_res.get("has_more", 0)
-                        sub_comments_cursor = sub_comments_res.get("cursor", 0)
-                        sub_comments = sub_comments_res.get("comments", [])
-
-                        if not sub_comments:
-                            continue
-                        result.extend(sub_comments)
-                        if callback:  # If there is a callback function, execute the callback function
+        async def process_pending_replies() -> None:
+            nonlocal collected_count
+            for pending in list(pending_items):
+                if max_count and collected_count >= max_count:
+                    break
+                comment_id = str(pending.get("comment_id") or "")
+                reply_total = optional_int(pending.get("expected_count")) or 0
+                if not comment_id:
+                    pending_items.remove(pending)
+                    continue
+                sub_scope_id = f"{aweme_id}:{comment_id}"
+                sub_checkpoint = await load_checkpoint("sub_comments", sub_scope_id)
+                accounted = int(pending.get("accounted_count") or 0)
+                already_saved = sub_checkpoint.collected_count if sub_checkpoint else 0
+                if already_saved > accounted:
+                    collected_count += already_saved - accounted
+                    pending["accounted_count"] = already_saved
+                    await persist_parent()
+                if sub_checkpoint and sub_checkpoint.status == "complete":
+                    pending_items.remove(pending)
+                    await persist_parent()
+                    continue
+                sub_cursor = int(sub_checkpoint.cursor) if sub_checkpoint else 0
+                sub_collected = already_saved
+                sub_has_more = True
+                while sub_has_more and (max_count == 0 or collected_count < max_count):
+                    previous_sub_cursor = sub_cursor
+                    response = await self.get_sub_comments(aweme_id, comment_id, sub_cursor)
+                    sub_has_more = bool(response.get("has_more", 0))
+                    sub_cursor = int(response.get("cursor") or previous_sub_cursor)
+                    sub_comments = response.get("comments") or []
+                    limit = remaining()
+                    if limit is not None:
+                        sub_comments = sub_comments[:limit]
+                    for sub_comment in sub_comments:
+                        sub_comment.setdefault("aweme_id", aweme_id)
+                        sub_comment["reply_id"] = str(sub_comment.get("reply_id") or comment_id)
+                        sub_comment.setdefault("reply_to_reply_id", comment_id)
+                    if sub_comments:
+                        if callback:
                             await callback(aweme_id, sub_comments)
-                        await asyncio.sleep(crawl_interval)
+                        result.extend(sub_comments)
+                        sub_collected += len(sub_comments)
+                    sub_status = "complete" if not sub_has_more or (max_count and collected_count + len(sub_comments) >= max_count) else "running"
+                    await save_checkpoint(
+                        DouyinCrawlCheckpoint(
+                            scope="sub_comments", scope_id=sub_scope_id,
+                            cursor=str(sub_cursor), status=sub_status,
+                            expected_count=reply_total, collected_count=sub_collected,
+                            updated_at=utils.get_current_timestamp(),
+                        )
+                    )
+                    collected_count += len(sub_comments)
+                    pending["accounted_count"] = sub_collected
+                    await persist_parent()
+                    if not sub_comments or sub_cursor == previous_sub_cursor:
+                        break
+                    await asyncio.sleep(crawl_interval)
+                if not sub_has_more or (max_count and collected_count >= max_count):
+                    pending_items.remove(pending)
+                    await persist_parent()
+
+        try:
+            if pending_items:
+                await process_pending_replies()
+                if not comments_has_more and not pending_items:
+                    await persist_parent("complete")
+                    return result
+
+            while comments_has_more and (max_count == 0 or collected_count < max_count):
+                current_cursor = comments_cursor
+                response = await self.get_aweme_comments(aweme_id, comments_cursor)
+                comments_has_more = bool(response.get("has_more", 0))
+                comments_cursor = int(response.get("cursor") or current_cursor)
+                expected_count = optional_int(response.get("total") or response.get("total_count")) or expected_count
+                comments = response.get("comments") or []
+                limit = remaining()
+                if limit is not None:
+                    comments = comments[:limit]
+                if comments:
+                    if callback:
+                        await callback(aweme_id, comments)
+                    result.extend(comments)
+                    collected_count += len(comments)
+                if is_fetch_sub_comments:
+                    for comment in comments:
+                        reply_total = optional_int(comment.get("reply_comment_total")) or 0
+                        comment_id = str(comment.get("cid") or "")
+                        if reply_total > 0 and comment_id:
+                            pending_items.append({
+                                "comment_id": comment_id,
+                                "expected_count": reply_total,
+                                "accounted_count": 0,
+                            })
+
+                # The primary page is durable before any reply request begins.
+                await persist_parent()
+                if pending_items and (max_count == 0 or collected_count < max_count):
+                    await process_pending_replies()
+                status = "complete" if not comments_has_more or (max_count and collected_count >= max_count) else "running"
+                if status == "complete":
+                    pending_items.clear()
+                await persist_parent(status)
+                if not comments or comments_cursor == current_cursor:
+                    break
+                await asyncio.sleep(crawl_interval)
+        except Exception as exc:
+            await persist_parent("partial" if collected_count else "failed", str(exc))
+            raise
         return result
 
     async def get_user_info(self, sec_user_id: str):
@@ -330,18 +464,47 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         return await self.get(uri, params)
 
     async def get_all_user_aweme_posts(self, sec_user_id: str, callback: Optional[Callable] = None):
+        checkpoint = await load_checkpoint("creator_posts", sec_user_id)
+        if checkpoint and checkpoint.status == "complete":
+            return []
         posts_has_more = 1
-        max_cursor = ""
+        max_cursor = checkpoint.cursor if checkpoint else ""
+        collected = checkpoint.collected_count if checkpoint else 0
         result = []
-        while posts_has_more == 1:
-            aweme_post_res = await self.get_user_aweme_posts(sec_user_id, max_cursor)
-            posts_has_more = aweme_post_res.get("has_more", 0)
-            max_cursor = aweme_post_res.get("max_cursor")
-            aweme_list = aweme_post_res.get("aweme_list") if aweme_post_res.get("aweme_list") else []
-            utils.logger.info(f"[DouYinClient.get_all_user_aweme_posts] get sec_user_id:{sec_user_id} video len : {len(aweme_list)}")
-            if callback:
-                await callback(aweme_list)
-            result.extend(aweme_list)
+        try:
+            while posts_has_more == 1:
+                current_cursor = max_cursor
+                aweme_post_res = await self.get_user_aweme_posts(sec_user_id, max_cursor)
+                posts_has_more = aweme_post_res.get("has_more", 0)
+                next_cursor = str(aweme_post_res.get("max_cursor") or current_cursor)
+                aweme_list = aweme_post_res.get("aweme_list") or []
+                utils.logger.info(f"[DouYinClient.get_all_user_aweme_posts] get sec_user_id:{sec_user_id} video len : {len(aweme_list)}")
+                if callback:
+                    await callback(aweme_list)
+                result.extend(aweme_list)
+                collected += len(aweme_list)
+                max_cursor = next_cursor
+                await save_checkpoint(
+                    DouyinCrawlCheckpoint(
+                        scope="creator_posts", scope_id=sec_user_id,
+                        cursor=max_cursor,
+                        status="running" if posts_has_more else "complete",
+                        collected_count=collected,
+                        updated_at=utils.get_current_timestamp(),
+                    )
+                )
+                if not aweme_list or next_cursor == current_cursor:
+                    break
+        except Exception as exc:
+            await save_checkpoint(
+                DouyinCrawlCheckpoint(
+                    scope="creator_posts", scope_id=sec_user_id,
+                    cursor=max_cursor, status="partial" if collected else "failed",
+                    collected_count=collected, last_error=str(exc),
+                    updated_at=utils.get_current_timestamp(),
+                )
+            )
+            raise
         return result
 
     async def get_aweme_media(self, url: str) -> Union[bytes, None]:

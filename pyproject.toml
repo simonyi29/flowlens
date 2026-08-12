@@ -1,10 +1,14 @@
 [project]
-name = "mediacrawler"
-author = "程序员阿江-Relakkes <relakkes@gmail.com>"
+name = "flowlens"
 version = "0.1.0"
-description = "A social media crawler project, support Xiaohongshu, Weibo, Zhihu, Bilibili, Douyin, BaiduTieBa etc."
+description = "FlowLens (流镜), a privacy-aware public short-video data collection and research platform derived from MediaCrawler."
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [
+    { name = "simonyi29", email = "zhang19960502@gmail.com" },
+]
+license = { file = "LICENSE" }
+keywords = ["douyin", "short-video", "data-collection", "research", "crawler"]
 dependencies = [
     "aiofiles~=23.2.1",
     "aiomysql==0.2.0",
@@ -41,6 +45,15 @@ dependencies = [
     "asyncpg>=0.31.0",
     "xhshow>=0.2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/simonyi29/flowlens"
+Repository = "https://github.com/simonyi29/flowlens.git"
+Issues = "https://github.com/simonyi29/flowlens/issues"
+Upstream = "https://github.com/NanmiCoder/MediaCrawler"
+
+[project.optional-dependencies]
+asr = ["faster-whisper>=1.1.0"]
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"

@@ -15,7 +15,8 @@
     "runtime": {
       "title": "RUNTIME",
       "description": "Runtime parameters"
-    }
+    },
+    "douyinEnhanced": {"title": "DOUYIN_ENHANCED", "description": "Profiles, complete comments, captions and local ASR"}
   },
   "field": {
     "platform": "PLATFORM",
@@ -57,6 +58,21 @@
     "subComments": "Sub-comments",
     "headlessMode": "HEADLESS_MODE",
     "headlessModeHint": "Run browser without GUI"
+    ,"topics": "TOPIC NAME, URL OR ID"
+    ,"topicsHint": "Separate multiple topics with commas; topic mode never falls back to keyword results"
+    ,"topicsPlaceholder": "Example: AI, https://www.douyin.com/challenge/123"
+    ,"maxComments": "COMMENTS SAFETY LIMIT"
+    ,"maxCommentsHint": "0 collects every primary and reply comment exposed by the API"
+    ,"creatorProfile": "Public creator metrics"
+    ,"forceCreatorRefresh": "Force creator refresh"
+    ,"nativeSubtitle": "Probe native subtitles"
+    ,"localAsr": "Local ASR fallback"
+    ,"asrModel": "ASR MODEL"
+    ,"asrLanguage": "ASR LANGUAGE"
+    ,"rawPayload": "Save sanitized raw payload"
+    ,"keepMedia": "Keep temporary ASR media"
+    ,"asrEnvironmentHint": "If faster-whisper is missing, only subtitle tasks fail; content and comments remain saved."
+    ,"staticProxy": "Enable existing static proxy (off by default)"
   },
   "button": {
     "initiateScan": "INITIATE SCAN",
