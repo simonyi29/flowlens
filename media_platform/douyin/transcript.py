@@ -134,8 +134,6 @@ class DouyinTranscriptService:
             raise RuntimeError("transcript service is closing")
         aweme_id = str(aweme.get("aweme_id") or "")
         checkpoint = await load_checkpoint("transcript", aweme_id)
-        if checkpoint and checkpoint.status == "complete":
-            return
         await self.start()
         await douyin_store.save_transcript(
             DouyinTranscript(

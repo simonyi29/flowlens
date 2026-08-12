@@ -822,6 +822,42 @@ def test_transcript_cancel_marks_active_and_queued_jobs_retryable(monkeypatch):
     assert all(item.status == "partial" for item in checkpoints)
 
 
+def test_completed_transcript_checkpoint_still_writes_current_output(monkeypatch):
+    import media_platform.douyin.transcript as transcript_module
+    from model.m_douyin import DouyinCrawlCheckpoint
+
+    saved = []
+
+    async def scenario():
+        async def downloader(_url):
+            return None
+
+        async def completed_checkpoint(_scope, scope_id):
+            return DouyinCrawlCheckpoint(
+                scope="transcript", scope_id=scope_id, status="complete",
+                updated_at=1,
+            )
+
+        async def save_transcript(item):
+            saved.append(item)
+
+        async def ignore_checkpoint(_item):
+            return None
+
+        service = DouyinTranscriptService(downloader)
+        monkeypatch.setattr(transcript_module, "load_checkpoint", completed_checkpoint)
+        monkeypatch.setattr(transcript_module, "save_checkpoint", ignore_checkpoint)
+        monkeypatch.setattr(transcript_module.douyin_store, "save_transcript", save_transcript)
+        monkeypatch.setattr(config, "DY_ENABLE_NATIVE_SUBTITLE", True)
+        monkeypatch.setattr(config, "DY_ENABLE_ASR", False)
+
+        await service.enqueue({"aweme_id": "existing-checkpoint"})
+        await service.drain_and_close()
+
+    asyncio.run(scenario())
+    assert [item.status for item in saved] == ["pending", "not_available"]
+
+
 def test_keyword_search_respects_small_limit_and_fetches_details(monkeypatch):
     import media_platform.douyin.core as core_module
 
