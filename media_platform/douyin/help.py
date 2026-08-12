@@ -158,9 +158,9 @@ def parse_creator_info_from_url(url: str) -> CreatorUrlInfo:
     # Extract sec_user_id from creator homepage URL: /user/xxx
     user_pattern = r'/user/([^/?]+)'
     match = re.search(user_pattern, url)
-    if match:
-        sec_user_id = match.group(1)
-    return CreatorUrlInfo(sec_user_id=sec_user_id)
+    if not match:
+        raise ValueError(f"Unable to parse creator ID from URL: {url}")
+    return CreatorUrlInfo(sec_user_id=match.group(1))
 
 
 def parse_topic_id_from_url(value: str) -> str:

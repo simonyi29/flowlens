@@ -19,7 +19,7 @@ from media_platform.douyin.normalizer import (
 )
 from media_platform.douyin.core import DouYinCrawler
 from media_platform.douyin.client import DouYinClient
-from media_platform.douyin.help import parse_topic_id_from_url
+from media_platform.douyin.help import parse_creator_info_from_url, parse_topic_id_from_url
 from media_platform.douyin.transcript import (
     DouyinTranscriptService,
     parse_caption_payload,
@@ -375,6 +375,49 @@ def test_topic_id_parser_accepts_id_and_url_forms():
     assert parse_topic_id_from_url("https://www.douyin.com/challenge/98765") == "98765"
     assert parse_topic_id_from_url("https://www.douyin.com/topic/456") == "456"
     assert parse_topic_id_from_url("https://www.douyin.com/?challenge_id=789") == "789"
+
+
+def test_invalid_creator_url_returns_clear_value_error():
+    with pytest.raises(ValueError, match="Unable to parse creator ID"):
+        parse_creator_info_from_url("https://www.douyin.com/not-a-user")
+
+
+def test_topic_discovery_rejects_ambiguous_exact_names(monkeypatch):
+    client = object.__new__(DouYinClient)
+
+    async def search(**_kwargs):
+        return {"data": [
+            {"aweme_info": {"text_extra": [{"hashtag_id": "1", "hashtag_name": "人工智能"}]}},
+            {"aweme_info": {"text_extra": [{"hashtag_id": "2", "hashtag_name": "人工智能"}]}},
+        ]}
+
+    monkeypatch.setattr(client, "search_info_by_keyword", search)
+    with pytest.raises(Exception, match="unique topic"):
+        asyncio.run(client.discover_topic("人工智能"))
+
+
+def test_topic_resolution_failure_persists_failed_checkpoint(monkeypatch):
+    import media_platform.douyin.core as core_module
+
+    class FakeClient:
+        async def discover_topic(self, _name):
+            raise RuntimeError("ambiguous topic")
+
+    crawler = DouYinCrawler()
+    crawler.dy_client = FakeClient()
+    checkpoints = []
+
+    async def save(item):
+        checkpoints.append(item)
+
+    monkeypatch.setattr(config, "DY_TOPICS", "人工智能")
+    monkeypatch.setattr(core_module, "save_checkpoint", save)
+    asyncio.run(crawler.search_topics())
+
+    assert checkpoints[-1].scope == "topic_resolution"
+    assert checkpoints[-1].scope_id == "人工智能"
+    assert checkpoints[-1].status == "failed"
+    assert "ambiguous topic" in checkpoints[-1].last_error
 
 
 def test_comment_pagination_subcomments_and_zero_limit(monkeypatch):
