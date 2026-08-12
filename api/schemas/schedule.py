@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,36 @@ class ScheduleRequest(BaseModel):
         return self
 
 
-def next_occurrence(interval_type: str, interval_value: int, base: datetime) -> datetime | None:
-    if interval_type == "once": return None
-    return base + (timedelta(hours=interval_value) if interval_type == "hourly" else timedelta(days=interval_value))
+def normalize_utc(value: datetime, timezone_name: str) -> datetime:
+    zone = ZoneInfo(timezone_name)
+    localized = value.replace(tzinfo=zone) if value.tzinfo is None else value.astimezone(zone)
+    return localized.astimezone(timezone.utc)
+
+
+def initial_occurrence(request: ScheduleRequest, now: datetime | None = None) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    if request.run_at:
+        candidate = normalize_utc(request.run_at, request.timezone)
+        if candidate > now or request.interval_type == "once":
+            return candidate
+    return next_occurrence(
+        request.interval_type, request.interval_value, now,
+        run_at=request.run_at, timezone_name=request.timezone,
+    ) or now
+
+
+def next_occurrence(interval_type: str, interval_value: int, base: datetime,
+                    *, run_at: datetime | None = None,
+                    timezone_name: str = "Asia/Shanghai") -> datetime | None:
+    base = normalize_utc(base, timezone_name)
+    if interval_type == "once":
+        return None
+    if interval_type == "hourly":
+        return base + timedelta(hours=interval_value)
+    zone = ZoneInfo(timezone_name)
+    local_base = base.astimezone(zone)
+    target = local_base + timedelta(days=interval_value)
+    if run_at:
+        local_run = run_at.replace(tzinfo=zone) if run_at.tzinfo is None else run_at.astimezone(zone)
+        target = target.replace(hour=local_run.hour, minute=local_run.minute, second=local_run.second, microsecond=0)
+    return target.astimezone(timezone.utc)

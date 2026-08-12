@@ -206,3 +206,13 @@ async def test_crawler_manager_uses_windows_graceful_break_signal(monkeypatch):
 
     assert await manager.stop() is True
     assert process.signals == [signal.CTRL_BREAK_EVENT]
+
+
+def test_task_continue_after_login_endpoint_uses_explicit_recovery(monkeypatch):
+    client = TestClient(app)
+    with patch("api.routers.tasks.crawler_manager.continue_after_login", new_callable=AsyncMock) as action:
+        action.return_value = True
+        response = client.post("/api/tasks/run-login/continue-after-login")
+    assert response.status_code == 200
+    assert response.json()["status"] == "queued"
+    action.assert_awaited_once_with("run-login")

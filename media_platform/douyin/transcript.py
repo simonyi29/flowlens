@@ -15,6 +15,8 @@ from model.m_douyin import DouyinCrawlCheckpoint
 from database.douyin_state import load_checkpoint, save_checkpoint
 from store import douyin as douyin_store
 from tools import utils
+from var import crawl_run_id_var
+from api.services.task_store import task_store
 
 
 MediaDownloader = Callable[[str], Awaitable[bytes | None]]
@@ -150,6 +152,11 @@ class DouyinTranscriptService:
 
     async def start(self) -> None:
         if self.worker_task is None:
+            await task_store.initialize()
+            await task_store.ensure_run(
+                crawl_run_id_var.get(),
+                {"platform": "dy", "crawler_type": "detail", "source": "transcript"},
+            )
             self.worker_task = asyncio.create_task(self._worker())
 
     async def enqueue(self, aweme: dict[str, Any]) -> None:
@@ -163,6 +170,9 @@ class DouyinTranscriptService:
                 aweme_id=aweme_id, status="pending",
                 retry_count=checkpoint.collected_count if checkpoint else 0,
             )
+        )
+        await task_store.upsert_task_item(
+            crawl_run_id_var.get(), aweme_id, "native_transcript", "queued", 0
         )
         await self.queue.put(aweme)
 
@@ -215,6 +225,8 @@ class DouyinTranscriptService:
 
     async def _process(self, aweme: dict[str, Any]) -> None:
         aweme_id = str(aweme.get("aweme_id") or "")
+        run_id = crawl_run_id_var.get()
+        await task_store.upsert_task_item(run_id, aweme_id, "native_transcript", "running", 0.1)
         native, language = find_native_caption(aweme)
         segments: list[DouyinTranscriptSegment] = []
         if native is not None and getattr(config, "DY_ENABLE_NATIVE_SUBTITLE", True):
@@ -223,7 +235,10 @@ class DouyinTranscriptService:
                 segments = parse_caption_payload(payload)
             if segments:
                 await self._save_completed(aweme_id, segments, "native", language, "")
+                await task_store.upsert_task_item(run_id, aweme_id, "native_transcript", "completed", 1)
                 return
+
+        await task_store.upsert_task_item(run_id, aweme_id, "native_transcript", "completed", 1)
 
         if not getattr(config, "DY_ENABLE_ASR", True):
             await douyin_store.save_transcript(
@@ -238,6 +253,7 @@ class DouyinTranscriptService:
                     collected_count=0, updated_at=utils.get_current_timestamp(),
                 )
             )
+            await task_store.upsert_task_item(run_id, aweme_id, "asr", "completed", 1)
             return
         video_urls = self._video_urls(aweme)
         if not video_urls:
@@ -252,6 +268,7 @@ class DouyinTranscriptService:
 
         temp_path = None
         try:
+            await task_store.upsert_task_item(run_id, aweme_id, "asr", "running", 0.1)
             temp_dir = Path("data/douyin/tmp")
             temp_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=temp_dir, suffix=".mp4", delete=False) as file:
@@ -264,6 +281,7 @@ class DouyinTranscriptService:
                 aweme_id, segments, "asr", getattr(config, "DY_ASR_LANGUAGE", "zh"),
                 getattr(config, "DY_ASR_MODEL", "small"),
             )
+            await task_store.upsert_task_item(run_id, aweme_id, "asr", "completed", 1)
         finally:
             keep_source = getattr(config, "DY_KEEP_ASR_SOURCE_MEDIA", getattr(config, "DY_KEEP_MEDIA", False))
             if temp_path and temp_path.exists() and not keep_source:
@@ -353,6 +371,11 @@ class DouyinTranscriptService:
                 collected_count=retries, last_error=error,
                 updated_at=utils.get_current_timestamp(),
             )
+        )
+        stage = "asr" if getattr(config, "DY_ENABLE_ASR", True) else "native_transcript"
+        await task_store.upsert_task_item(
+            crawl_run_id_var.get(), aweme_id, stage, "failed", 0,
+            "asr_inference_error" if stage == "asr" else "unknown", error,
         )
 
     @staticmethod

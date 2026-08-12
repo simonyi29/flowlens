@@ -469,6 +469,16 @@ export function CrawlerConfigPanel() {
                 onChange={(e) => updateConfig({ max_media_total_bytes: Math.max(1, Number(e.target.value) || 1) * 1073741824 })}
                 disabled={isDisabled || !config.download_media} className="h-9 text-xs" />
             </Field>
+            <Field label="媒体库总配额（GB）">
+              <Input type="number" min={1} value={Math.round(config.media_library_max_bytes / 1073741824)}
+                onChange={(e) => updateConfig({ media_library_max_bytes: Math.max(1, Number(e.target.value) || 1) * 1073741824 })}
+                disabled={isDisabled || !config.download_media} className="h-9 text-xs" />
+            </Field>
+            <Field label="最低磁盘剩余（GB）">
+              <Input type="number" min={0} value={Math.round(config.min_free_disk_bytes / 1073741824)}
+                onChange={(e) => updateConfig({ min_free_disk_bytes: Math.max(0, Number(e.target.value) || 0) * 1073741824 })}
+                disabled={isDisabled || !config.download_media} className="h-9 text-xs" />
+            </Field>
             <Field label="连续旧作品停止数">
               <Input type="number" min={1} value={config.stop_after_existing}
                 onChange={(e) => updateConfig({ stop_after_existing: Math.max(1, Number(e.target.value) || 5) })}

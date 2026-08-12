@@ -1111,10 +1111,60 @@ def test_keyword_search_missing_data_is_failed_not_empty_success(monkeypatch):
     monkeypatch.setattr(core_module, "load_checkpoint", no_checkpoint)
     monkeypatch.setattr(core_module, "save_checkpoint", save)
 
-    asyncio.run(crawler.search())
+    with pytest.raises(RuntimeError, match="risk_controlled"):
+        asyncio.run(crawler.search())
 
     assert checkpoints[-1].status == "failed"
-    assert "missing data" in checkpoints[-1].last_error
+    assert "risk_controlled" in checkpoints[-1].last_error
+
+
+def test_required_douyin_response_shapes_raise_schema_changed(monkeypatch):
+    from media_platform.douyin.exception import ApiSchemaChangedError
+
+    client = object.__new__(DouYinClient)
+    client.headers = {"Origin": "https://www.douyin.com"}
+
+    async def malformed(*_args, **_kwargs):
+        return {"status_code": 0, "unexpected": []}
+
+    monkeypatch.setattr(client, "get", malformed)
+    with pytest.raises(ApiSchemaChangedError, match="api_schema_changed"):
+        asyncio.run(client.get_video_by_id("a1"))
+    with pytest.raises(ApiSchemaChangedError, match="api_schema_changed"):
+        asyncio.run(client.get_topic_awemes("t1"))
+
+
+def test_detail_risk_control_is_not_swallowed(monkeypatch):
+    from media_platform.douyin.exception import DataFetchError
+
+    class RiskClient:
+        async def get_video_by_id(self, _aweme_id):
+            raise DataFetchError("Blocked by ArgusSecurityPlugin Validate Error")
+
+    crawler = DouYinCrawler()
+    crawler.dy_client = RiskClient()
+    monkeypatch.setattr(config, "CRAWLER_MAX_SLEEP_SEC", 0)
+    with pytest.raises(RuntimeError, match="risk_controlled"):
+        asyncio.run(crawler.get_aweme_detail("a1", asyncio.Semaphore(1)))
+
+
+def test_incremental_can_skip_existing_metric_refresh(monkeypatch):
+    import media_platform.douyin.core as core_module
+
+    crawler = DouYinCrawler()
+    writes=[]
+    async def exists(*_args): return True
+    async def write(**_kwargs): writes.append(_kwargs)
+    async def touch(*_args): return None
+    async def item(*_args,**_kwargs): return None
+    monkeypatch.setattr(config,"DY_INCREMENTAL",True)
+    monkeypatch.setattr(config,"DY_REFRESH_EXISTING_METRICS",False)
+    monkeypatch.setattr(core_module.task_store,"entity_exists",exists)
+    monkeypatch.setattr(core_module.task_store,"touch_entity",touch)
+    monkeypatch.setattr(core_module.task_store,"upsert_task_item",item)
+    monkeypatch.setattr(core_module.douyin_store,"update_douyin_aweme",write)
+    assert asyncio.run(crawler.process_aweme_detail({"aweme_id":"old"})) is False
+    assert writes == []
 
 
 def test_keyword_search_retries_with_exponential_backoff(monkeypatch):
@@ -1181,8 +1231,16 @@ def test_crawler_cancellation_uses_transcript_cancel_path(monkeypatch):
             return None
 
     class FakePage:
+        url = "https://www.douyin.com/"
+
         async def goto(self, _url, **_kwargs):
             return None
+
+        def locator(self, _selector):
+            return self
+
+        async def inner_text(self, **_kwargs):
+            return ""
 
     class FakeBrowserContext:
         async def new_page(self):

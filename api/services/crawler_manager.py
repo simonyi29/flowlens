@@ -265,6 +265,12 @@ class CrawlerManager:
             await task_store.update_run(run_id, "paused")
         return stopped
 
+    async def continue_after_login(self, run_id: str) -> bool:
+        item = await task_store.get_run(run_id)
+        if not item or item["status"] != "waiting_for_login":
+            return False
+        return await self.resume(run_id)
+
     async def cancel(self, run_id: str) -> bool:
         item = await task_store.get_run(run_id)
         if not item or item["status"] in {"completed", "cancelled"}:
@@ -290,8 +296,13 @@ class CrawlerManager:
         item = await task_store.get_run(run_id)
         if not item or item["status"] not in {"failed", "partial", "cancelled"}:
             return None
+        await task_store.retry_failed_items(run_id)
         config = CrawlerStartRequest.model_validate(json.loads(item["config_json"]))
-        return await self.enqueue(config)
+        await task_store.update_run(run_id, "queued")
+        self._queued_configs[run_id] = config
+        if not self.process or self.process.poll() is not None:
+            await self.start_next_queued()
+        return run_id
 
     def get_status(self) -> dict:
         """Get current status"""
@@ -430,7 +441,7 @@ class CrawlerManager:
                 if self.current_run_id:
                     final_status = "completed" if exit_code == 0 else (
                         "waiting_for_space" if self._detected_error_type in {"disk_space_low", "disk_quota_reached"}
-                        else "waiting_for_login" if self._detected_error_type in {"login_required", "captcha_required"}
+                        else "waiting_for_login" if self._detected_error_type in {"login_required", "captcha_required", "risk_controlled"}
                         else "partial"
                     )
                     await task_store.update_run(

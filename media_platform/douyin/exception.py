@@ -27,3 +27,13 @@ class DataFetchError(RequestError):
 
 class IPBlockError(RequestError):
     """fetch so fast that the server block us ip"""
+
+
+class ApiSchemaChangedError(DataFetchError):
+    """A successful response no longer contains the required public API shape."""
+
+    error_type = "api_schema_changed"
+
+
+class RiskControlledError(RuntimeError):
+    error_type = "risk_controlled"

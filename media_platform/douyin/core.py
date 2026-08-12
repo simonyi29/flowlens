@@ -50,9 +50,10 @@ from var import (
     source_keyword_var,
     source_topic_var,
 )
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .client import DouYinClient
-from .exception import DataFetchError
+from .exception import ApiSchemaChangedError, DataFetchError, RiskControlledError
 from .field import PublishTimeType
 from .help import (
     parse_creator_info_from_url,
@@ -134,9 +135,20 @@ class DouYinCrawler(AbstractCrawler):
             self.context_page = await self.browser_context.new_page()
             # Douyin keeps advertising/analytics requests alive; waiting for the
             # full load event makes a healthy CDP session look unavailable.
-            await self.context_page.goto(
-                self.index_url, wait_until="domcontentloaded", timeout=45_000
-            )
+            try:
+                await self.context_page.goto(
+                    self.index_url, wait_until="domcontentloaded", timeout=45_000
+                )
+            except PlaywrightTimeoutError:
+                if "douyin.com" not in str(self.context_page.url):
+                    raise
+                utils.logger.warning("[DouYinCrawler] homepage navigation timed out after reaching Douyin")
+            page_url = str(self.context_page.url).lower()
+            page_text = (await self.context_page.locator("body").inner_text(timeout=5_000)).lower()
+            if any(token in page_url or token in page_text for token in ("captcha", "验证码", "安全验证")):
+                raise RuntimeError("captcha_required: complete verification in the connected Chrome")
+            if any(token in page_url for token in ("passport", "/login")):
+                raise RuntimeError("login_required: sign in using the connected Chrome")
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
             if getattr(config, "DY_DOWNLOAD_MEDIA", False):
@@ -269,7 +281,11 @@ class DouYinCrawler(AbstractCrawler):
                 if posts_res is None:
                     break
                 if "data" not in posts_res:
-                    error = "search response is missing data; login may have expired or risk control may be active"
+                    error = (
+                        "risk_controlled: search response was rejected"
+                        if posts_res.get("status_code") not in (None, 0)
+                        else "api_schema_changed: search response is missing data"
+                    )
                     utils.logger.error(
                         f"[DouYinCrawler.search] keyword {keyword}: {error}"
                     )
@@ -281,7 +297,7 @@ class DouYinCrawler(AbstractCrawler):
                             updated_at=utils.get_current_timestamp(),
                         )
                     )
-                    break
+                    raise RiskControlledError(error) if error.startswith("risk_controlled") else ApiSchemaChangedError(error)
                 if not posts_res.get("data"):
                     utils.logger.info(
                         f"[DouYinCrawler.search] keyword {keyword}, page {page} is empty"
@@ -350,7 +366,12 @@ class DouYinCrawler(AbstractCrawler):
         run_id = crawl_run_id_var.get()
         await task_store.upsert_task_item(run_id, aweme_id, "detail", "running", 0.1)
         existed = await task_store.entity_exists("dy", "aweme", aweme_id)
-        await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
+        should_refresh = not (
+            existed and getattr(config, "DY_INCREMENTAL", False)
+            and not getattr(config, "DY_REFRESH_EXISTING_METRICS", True)
+        )
+        if should_refresh:
+            await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
         await task_store.touch_entity("dy", "aweme", aweme_id, run_id)
         await task_store.upsert_task_item(run_id, aweme_id, "detail", "completed", 1)
         if existed and getattr(config, "DY_INCREMENTAL", False):
@@ -490,6 +511,9 @@ class DouYinCrawler(AbstractCrawler):
             return
         self.seen_creator_ids.add(sec_user_id)
         checkpoint_id = anonymize_user_id(sec_user_id)
+        await task_store.upsert_task_item(
+            crawl_run_id_var.get(), checkpoint_id, "creator", "running", 0.1
+        )
         checkpoint = await load_checkpoint("creator_profile", checkpoint_id)
         refresh_ms = int(getattr(config, "DY_CREATOR_REFRESH_INTERVAL_SEC", 86400) * 1000)
         if (
@@ -497,6 +521,9 @@ class DouYinCrawler(AbstractCrawler):
             and not getattr(config, "DY_FORCE_CREATOR_REFRESH", False)
             and utils.get_current_timestamp() - checkpoint.updated_at < refresh_ms
         ):
+            await task_store.upsert_task_item(
+                crawl_run_id_var.get(), checkpoint_id, "creator", "completed", 1
+            )
             return
         try:
             creator_info = await self.dy_client.get_user_info(sec_user_id)
@@ -508,7 +535,14 @@ class DouYinCrawler(AbstractCrawler):
                         collected_count=1, updated_at=utils.get_current_timestamp(),
                     )
                 )
+                await task_store.upsert_task_item(
+                    crawl_run_id_var.get(), checkpoint_id, "creator", "completed", 1
+                )
         except DataFetchError as exc:
+            await task_store.upsert_task_item(
+                crawl_run_id_var.get(), checkpoint_id, "creator", "failed", 0,
+                "unknown", str(exc),
+            )
             utils.logger.warning(
                 f"[DouYinCrawler.process_aweme_detail] creator profile unavailable: {exc}"
             )
@@ -588,7 +622,7 @@ class DouYinCrawler(AbstractCrawler):
                     utils.logger.error(
                         f"[DouYinCrawler.search_topics] true topic endpoint failed for {topic_id}: {exc}"
                     )
-                    break
+                    raise
                 awemes = response.get("aweme_list") or []
                 page_ids = []
                 for item in awemes:
@@ -678,8 +712,15 @@ class DouYinCrawler(AbstractCrawler):
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[DouYinCrawler.get_aweme_detail] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching aweme {aweme_id}")
                 return result
+            except ApiSchemaChangedError:
+                raise
             except DataFetchError as ex:
                 utils.logger.error(f"[DouYinCrawler.get_aweme_detail] Get aweme detail error: {ex}")
+                message = str(ex).lower()
+                if any(token in message for token in ("argussecurityplugin", "validate error", "risk", "captcha")):
+                    raise RiskControlledError(
+                        "risk_controlled: Douyin rejected the detail request; pause and continue later"
+                    ) from ex
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[DouYinCrawler.get_aweme_detail] have not fund note detail aweme_id:{aweme_id}, err: {ex}")
@@ -704,6 +745,9 @@ class DouYinCrawler(AbstractCrawler):
     async def get_comments(self, aweme_id: str, semaphore: asyncio.Semaphore) -> None:
         async with semaphore:
             try:
+                await task_store.upsert_task_item(
+                    crawl_run_id_var.get(), aweme_id, "comments", "running", 0.1
+                )
                 # Pass the list of keywords to the get_aweme_all_comments method
                 # Use fixed crawling interval
                 crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
@@ -718,8 +762,18 @@ class DouYinCrawler(AbstractCrawler):
                 await asyncio.sleep(crawl_interval)
                 utils.logger.info(f"[DouYinCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for aweme {aweme_id}")
                 utils.logger.info(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments have all been obtained and filtered ...")
+                await task_store.upsert_task_item(
+                    crawl_run_id_var.get(), aweme_id, "comments", "completed", 1
+                )
             except Exception as e:
+                error_type = getattr(e, "error_type", "unknown")
+                await task_store.upsert_task_item(
+                    crawl_run_id_var.get(), aweme_id, "comments", "partial", 0,
+                    error_type, str(e),
+                )
                 utils.logger.error(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} get comments failed, error: {e}")
+                if error_type in {"api_schema_changed", "risk_controlled"}:
+                    raise
 
     async def get_creators_and_videos(self) -> None:
         """

@@ -136,6 +136,7 @@ class TaskStore:
     def _update_run_sync(self, run_id, status, stage, error_type, error_message):
         fields, values = ["status=?", "error_type=?", "error_message=?"], [status, error_type, error_message]
         if stage: fields.append("stage=?"); values.append(stage)
+        if status in {'queued','running'}: fields.append("finished_at=NULL")
         if status == 'running': fields.append("started_at=COALESCE(started_at,?)"); values.append(_now())
         if status in {'completed','failed','cancelled','partial'}: fields.append("finished_at=?"); values.append(_now())
         values.append(run_id)
@@ -162,6 +163,22 @@ class TaskStore:
         )
         return rows[0] if rows else None
 
+    async def retry_failed_items(self, run_id: str) -> int:
+        async with self._lock:
+            return await asyncio.to_thread(self._retry_failed_items_sync, run_id)
+
+    def _retry_failed_items_sync(self, run_id: str) -> int:
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE crawl_task_item SET status='queued',progress=0,error_type=NULL,error_message=NULL,updated_at=? "
+                "WHERE run_id=? AND status IN ('failed','partial')", (_now(), run_id),
+            )
+            db.execute(
+                "UPDATE crawl_task SET status='queued',failed_count=0,updated_at=? WHERE run_id=? AND status IN ('failed','partial')",
+                (_now(), run_id),
+            )
+            return int(cursor.rowcount or 0)
+
     async def list_items(self, run_id):
         return await asyncio.to_thread(self._query, "SELECT * FROM crawl_task_item WHERE run_id=? ORDER BY id", (run_id,))
 
@@ -186,7 +203,44 @@ class TaskStore:
         sql = """INSERT INTO crawl_task_item(run_id,entity_id,stage,status,progress,error_type,error_message,updated_at)
         VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,entity_id,stage) DO UPDATE SET status=excluded.status,
         progress=excluded.progress,error_type=excluded.error_type,error_message=excluded.error_message,updated_at=excluded.updated_at"""
-        async with self._lock: await asyncio.to_thread(self._execute, sql, (run_id,entity_id,stage,status,progress,error_type,error_message,_now()))
+        args = (run_id,entity_id,stage,status,progress,error_type,error_message,_now())
+        async with self._lock:
+            await asyncio.to_thread(self._upsert_task_item_sync, sql, args, run_id)
+
+    def _upsert_task_item_sync(self, sql: str, args: tuple, run_id: str) -> None:
+        # Unit-level services and direct CLI calls can enter a stage without the
+        # API scheduler. Create a minimal parent atomically so stage telemetry
+        # never breaks otherwise successful collection work.
+        with self._connect() as db:
+            exists = db.execute("SELECT 1 FROM crawl_run WHERE run_id=?", (run_id,)).fetchone()
+            if not exists:
+                now = _now()
+                db.execute(
+                    "INSERT INTO crawl_run(run_id,platform,crawler_type,status,stage,config_json,created_at,started_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (run_id, "dy", "detail", "running", "discover", "{}", now, now),
+                )
+                db.executemany(
+                    "INSERT INTO crawl_task(run_id,stage,status,updated_at) VALUES(?,?,?,?)",
+                    [(run_id, value, "queued", now) for value in
+                     ("discover","detail","creator","comments","native_transcript","media_download","asr","finalize")],
+                )
+            db.execute(sql, args)
+            entity_stage, entity_status = args[2], args[3]
+            counts = db.execute(
+                "SELECT COUNT(*),SUM(status='completed'),SUM(status IN ('failed','partial')) "
+                "FROM crawl_task_item WHERE run_id=? AND stage=?", (run_id, entity_stage),
+            ).fetchone()
+            stage_status = (
+                "running" if entity_status in {"running", "queued"}
+                else "partial" if int(counts[2] or 0) else "completed"
+            )
+            db.execute(
+                "UPDATE crawl_task SET status=?,total_count=?,completed_count=?,failed_count=?,updated_at=? "
+                "WHERE run_id=? AND stage=?",
+                (stage_status, int(counts[0] or 0), int(counts[1] or 0), int(counts[2] or 0), _now(), run_id, entity_stage),
+            )
+            if entity_status == "running":
+                db.execute("UPDATE crawl_run SET stage=? WHERE run_id=?", (entity_stage, run_id))
 
     async def list_logs(self, run_id, limit=500):
         return await asyncio.to_thread(self._query, "SELECT * FROM task_log WHERE run_id=? ORDER BY id DESC LIMIT ?", (run_id,limit))
@@ -194,7 +248,10 @@ class TaskStore:
     async def upsert_media(self, item: dict[str, Any]) -> str:
         asset_id = item.get("asset_id")
         if not asset_id:
-            identity = f"{item['aweme_id']}|{item['kind']}|{item.get('path') or item.get('part_path') or ''}"
+            asset_path = str(item.get("path") or item.get("part_path") or "")
+            if asset_path.endswith(".part"):
+                asset_path = asset_path[:-5]
+            identity = f"{item['aweme_id']}|{item['kind']}|{asset_path}"
             asset_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
         now = _now()
         values = (
@@ -217,6 +274,42 @@ class TaskStore:
         if aweme_id:
             return await asyncio.to_thread(self._query, "SELECT * FROM media_asset WHERE aweme_id=? ORDER BY updated_at DESC LIMIT ? OFFSET ?", (aweme_id,limit,offset))
         return await asyncio.to_thread(self._query, "SELECT * FROM media_asset ORDER BY updated_at DESC LIMIT ? OFFSET ?", (limit,offset))
+
+    async def run_summary(self, run_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._run_summary_sync, run_id)
+
+    def _run_summary_sync(self, run_id: str) -> dict[str, Any]:
+        with self._connect() as db:
+            run = db.execute("SELECT * FROM crawl_run WHERE run_id=?", (run_id,)).fetchone()
+            if not run:
+                return {}
+            media = db.execute(
+                "SELECT COALESCE(SUM(size_bytes),0),COUNT(*),MIN(created_at),MAX(updated_at) "
+                "FROM media_asset WHERE run_id=? AND status='completed'", (run_id,),
+            ).fetchone()
+        start_text = run["started_at"] or run["created_at"]
+        end_text = run["finished_at"] or _now()
+        try:
+            elapsed = max((datetime.fromisoformat(end_text) - datetime.fromisoformat(start_text)).total_seconds(), 0.0)
+        except (TypeError, ValueError):
+            elapsed = 0.0
+        downloaded = int(media[0] or 0)
+        try:
+            config = json.loads(run["config_json"] or "{}")
+        except json.JSONDecodeError:
+            config = {}
+        quota = int(config.get("max_media_total_bytes") or 0)
+        remaining = max(quota - downloaded, 0) if quota else 0
+        speed = downloaded / elapsed if elapsed else 0
+        return {
+            "elapsed_seconds": round(elapsed, 3),
+            "downloaded_bytes": downloaded,
+            "completed_media_assets": int(media[1] or 0),
+            "average_download_bytes_per_second": round(speed, 2),
+            "task_media_quota_bytes": quota,
+            "remaining_quota_bytes": remaining,
+            "estimated_remaining_seconds": round(remaining / speed, 1) if remaining and speed else None,
+        }
 
     async def get_media(self, asset_id):
         rows = await asyncio.to_thread(self._query, "SELECT * FROM media_asset WHERE asset_id=?", (asset_id,))

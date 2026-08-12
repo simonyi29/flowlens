@@ -144,6 +144,31 @@ async def full_text_search(q: str = Query(min_length=1), limit: int = Query(50, 
     return {"awemes":awemes,"transcripts":transcripts,"comments":comments,"engine":"like"}
 
 
+@router.get("/stats")
+async def library_stats():
+    """Small local-only aggregates used by the content dashboard."""
+    with _db() as db:
+        counts = {
+            "awemes": db.execute("SELECT COUNT(*) FROM douyin_aweme").fetchone()[0],
+            "creators": db.execute("SELECT COUNT(*) FROM douyin_creator").fetchone()[0],
+            "topics": db.execute("SELECT COUNT(*) FROM douyin_topic").fetchone()[0],
+            "comments": db.execute("SELECT COUNT(*) FROM douyin_aweme_comment").fetchone()[0],
+            "replies": db.execute("SELECT COUNT(*) FROM douyin_aweme_comment WHERE level=2").fetchone()[0],
+            "transcripts": db.execute("SELECT COUNT(*) FROM douyin_transcript WHERE status IN ('native_completed','asr_completed')").fetchone()[0],
+        }
+        high_liked_comments = [dict(row) for row in db.execute(
+            "SELECT comment_id,aweme_id,content,like_count FROM douyin_aweme_comment "
+            "ORDER BY COALESCE(like_count,0) DESC LIMIT 10"
+        )]
+        topic_engagement = [dict(row) for row in db.execute(
+            "SELECT source_topic AS topic,COUNT(*) AS aweme_count,"
+            "AVG(COALESCE(liked_count,0)+COALESCE(comment_count,0)+COALESCE(share_count,0)) AS avg_engagement "
+            "FROM douyin_aweme WHERE source_topic IS NOT NULL AND source_topic<>'' "
+            "GROUP BY source_topic ORDER BY aweme_count DESC LIMIT 20"
+        )]
+    return {"counts": counts, "high_liked_comments": high_liked_comments, "topic_engagement": topic_engagement}
+
+
 @router.get("/export")
 async def export_awemes(format: str = "jsonl", q: str = ""):
     data = await list_awemes(q=q, limit=500, offset=0)

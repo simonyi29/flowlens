@@ -16,7 +16,7 @@ async def get_task(run_id: str):
     item = await task_store.get_run(run_id)
     if not item:
         raise HTTPException(404, "Task not found")
-    return item
+    return {**item, "summary": await task_store.run_summary(run_id), "stages": await task_store.list_stages(run_id)}
 
 
 @router.get("/{run_id}/items")
@@ -40,6 +40,13 @@ async def pause_task(run_id: str):
 async def resume_task(run_id: str):
     if not await crawler_manager.resume(run_id):
         raise HTTPException(409, "Task cannot be resumed")
+    return {"status": "queued", "run_id": run_id}
+
+
+@router.post("/{run_id}/continue-after-login")
+async def continue_after_login(run_id: str):
+    if not await crawler_manager.continue_after_login(run_id):
+        raise HTTPException(409, "Task is not waiting for login or verification")
     return {"status": "queued", "run_id": run_id}
 
 

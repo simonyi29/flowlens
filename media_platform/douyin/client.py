@@ -223,7 +223,11 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         headers = copy.copy(self.headers)
         del headers["Origin"]
         res = await self.get("/aweme/v1/web/aweme/detail/", params, headers)
-        return res.get("aweme_detail", {})
+        if "aweme_detail" not in res or not isinstance(res.get("aweme_detail"), dict):
+            raise ApiSchemaChangedError(
+                f"api_schema_changed: detail response missing aweme_detail; keys={sorted(res)[:20]}"
+            )
+        return res["aweme_detail"]
 
     async def discover_topic(self, topic_name: str) -> Dict:
         """Resolve a topic name to a real challenge id using search metadata only."""
@@ -252,10 +256,15 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
     async def get_topic_awemes(
         self, topic_id: str, cursor: int = 0, count: int = 20
     ) -> Dict:
-        return await self.get(
+        response = await self.get(
             "/aweme/v1/web/challenge/aweme/",
             {"ch_id": topic_id, "cursor": cursor, "count": count},
         )
+        if "aweme_list" not in response or not any(key in response for key in ("cursor", "max_cursor", "has_more")):
+            raise ApiSchemaChangedError(
+                f"api_schema_changed: topic response missing list/cursor; keys={sorted(response)[:20]}"
+            )
+        return response
 
     async def get_aweme_comments(self, aweme_id: str, cursor: int = 0):
         """get note comments
@@ -361,6 +370,10 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                 while sub_has_more and (max_count == 0 or collected_count < max_count):
                     previous_sub_cursor = sub_cursor
                     response = await self.get_sub_comments(aweme_id, comment_id, sub_cursor)
+                    if "comments" not in response or not any(key in response for key in ("cursor", "has_more")):
+                        raise ApiSchemaChangedError(
+                            f"api_schema_changed: reply response missing comments/cursor; keys={sorted(response)[:20]}"
+                        )
                     sub_has_more = bool(response.get("has_more", 0))
                     sub_cursor = int(response.get("cursor") or previous_sub_cursor)
                     sub_comments = response.get("comments") or []
@@ -411,6 +424,10 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             while comments_has_more and (max_count == 0 or collected_count < max_count):
                 current_cursor = comments_cursor
                 response = await self.get_aweme_comments(aweme_id, comments_cursor)
+                if "comments" not in response or not any(key in response for key in ("cursor", "has_more")):
+                    raise ApiSchemaChangedError(
+                        f"api_schema_changed: comment response missing comments/cursor; keys={sorted(response)[:20]}"
+                    )
                 comments_has_more = bool(response.get("has_more", 0))
                 comments_cursor = int(response.get("cursor") or current_cursor)
                 expected_count = optional_int(response.get("total") or response.get("total_count")) or expected_count
@@ -500,6 +517,12 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             while posts_has_more == 1 and (max_count <= 0 or collected < max_count):
                 current_cursor = max_cursor
                 aweme_post_res = await self.get_user_aweme_posts(sec_user_id, max_cursor)
+                if "aweme_list" not in aweme_post_res or not any(
+                    key in aweme_post_res for key in ("max_cursor", "has_more")
+                ):
+                    raise ApiSchemaChangedError(
+                        f"api_schema_changed: creator response missing list/cursor; keys={sorted(aweme_post_res)[:20]}"
+                    )
                 posts_has_more = aweme_post_res.get("has_more", 0)
                 next_cursor = str(aweme_post_res.get("max_cursor") or current_cursor)
                 aweme_list = aweme_post_res.get("aweme_list") or []

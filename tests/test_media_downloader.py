@@ -46,3 +46,36 @@ def test_download_rejects_html(monkeypatch, tmp_path):
         assert not (tmp_path / "video.mp4").exists()
         await client.aclose()
     asyncio.run(scenario())
+
+
+def test_download_restarts_when_server_ignores_range(monkeypatch, tmp_path):
+    body = b"complete-media"
+    async def handler(request):
+        assert request.headers.get("range") == "bytes=4-"
+        return httpx.Response(200, headers={"content-type":"video/mp4"}, content=body)
+    part = tmp_path / "video.mp4.part"; part.write_bytes(b"old-")
+    monkeypatch.setattr(config, "DY_MAX_MEDIA_TOTAL_BYTES", 1000)
+    monkeypatch.setattr(config, "DY_MEDIA_LIBRARY_MAX_BYTES", 1000)
+    monkeypatch.setattr(config, "DY_MIN_FREE_DISK_BYTES", 0)
+    async def scenario():
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        service=PermanentMediaDownloader(tmp_path,client)
+        result=await service.download(["https://cdn/video"],tmp_path/"video.mp4",verify=False)
+        assert not result.resumed
+        assert result.path.read_bytes()==body
+        await client.aclose()
+    asyncio.run(scenario())
+
+
+def test_download_rejects_task_and_disk_quotas(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DY_MAX_MEDIA_TOTAL_BYTES", 3)
+    monkeypatch.setattr(config, "DY_MEDIA_LIBRARY_MAX_BYTES", 1000)
+    monkeypatch.setattr(config, "DY_MIN_FREE_DISK_BYTES", 0)
+    async def handler(_request): return httpx.Response(200,headers={"content-type":"video/mp4","content-length":"4"},content=b"1234")
+    async def scenario():
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        service=PermanentMediaDownloader(tmp_path,client)
+        with pytest.raises(MediaDownloadError,match="disk_quota_reached"):
+            await service.download(["https://cdn/video"],tmp_path/"video.mp4",verify=False)
+        await client.aclose()
+    asyncio.run(scenario())

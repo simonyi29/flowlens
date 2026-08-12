@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 
 from ..schemas.crawler import CrawlerStartRequest
-from ..schemas.schedule import ScheduleRequest, next_occurrence
+from ..schemas.schedule import ScheduleRequest, initial_occurrence, next_occurrence
 from ..services import crawler_manager
 from ..services.task_store import task_store
 
@@ -25,8 +25,7 @@ async def get_schedule(schedule_id: str):
 @router.post("")
 async def create_schedule(request: ScheduleRequest):
     payload = request.model_dump(mode="json")
-    base = request.next_run_at or request.run_at or datetime.now(timezone.utc)
-    payload["next_run_at"] = base.isoformat()
+    payload["next_run_at"] = (request.next_run_at or initial_occurrence(request)).isoformat()
     schedule_id = await task_store.save_schedule(payload)
     return {"schedule_id": schedule_id}
 
@@ -35,7 +34,7 @@ async def create_schedule(request: ScheduleRequest):
 async def update_schedule(schedule_id: str, request: ScheduleRequest):
     if not await task_store.get_schedule(schedule_id): raise HTTPException(404, "Schedule not found")
     payload = request.model_dump(mode="json")
-    payload["next_run_at"] = (request.next_run_at or request.run_at or datetime.now(timezone.utc)).isoformat()
+    payload["next_run_at"] = (request.next_run_at or initial_occurrence(request)).isoformat()
     await task_store.save_schedule(payload, schedule_id)
     return {"schedule_id": schedule_id}
 
@@ -57,6 +56,8 @@ async def run_now(schedule_id: str):
     else: config["topics"] = item["source"]
     run_id = await crawler_manager.enqueue(CrawlerStartRequest.model_validate(config))
     now = datetime.now(timezone.utc)
-    nxt = next_occurrence(item["interval_type"], item["interval_value"], now)
+    run_at = datetime.fromisoformat(item["run_at"]) if item.get("run_at") else None
+    nxt = next_occurrence(item["interval_type"], item["interval_value"], now,
+                          run_at=run_at, timezone_name=item["timezone"])
     await task_store.mark_schedule_run(schedule_id, now.isoformat(), nxt.isoformat() if nxt else None)
     return {"run_id": run_id}

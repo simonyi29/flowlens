@@ -9,7 +9,10 @@ from .task_store import task_store
 
 
 class ScheduleRunner:
-    def __init__(self): self.task: asyncio.Task | None = None
+    def __init__(self, *, store=task_store, manager=crawler_manager, clock=None):
+        self.task: asyncio.Task | None = None
+        self.store, self.manager = store, manager
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def start(self):
         if not self.task or self.task.done(): self.task = asyncio.create_task(self._loop())
@@ -19,16 +22,18 @@ class ScheduleRunner:
             self.task.cancel(); await asyncio.gather(self.task, return_exceptions=True); self.task = None
 
     async def tick(self):
-        now = datetime.now(timezone.utc)
-        for item in await task_store.due_schedules(now.isoformat()):
-            if await task_store.schedule_has_active_run(item["schedule_id"]): continue
+        now = self.clock()
+        for item in await self.store.due_schedules(now.isoformat()):
+            if await self.store.schedule_has_active_run(item["schedule_id"]): continue
             payload = json.loads(item["config_json"])
             payload.update({"platform":"dy", "crawler_type":item["crawler_type"]})
             payload["schedule_id"] = item["schedule_id"]
             payload["creator_ids" if item["crawler_type"] == "creator" else "topics"] = item["source"]
-            await crawler_manager.enqueue(CrawlerStartRequest.model_validate(payload))
-            nxt = next_occurrence(item["interval_type"], item["interval_value"], now)
-            await task_store.mark_schedule_run(item["schedule_id"], now.isoformat(), nxt.isoformat() if nxt else None)
+            await self.manager.enqueue(CrawlerStartRequest.model_validate(payload))
+            run_at = datetime.fromisoformat(item["run_at"]) if item.get("run_at") else None
+            nxt = next_occurrence(item["interval_type"], item["interval_value"], now,
+                                  run_at=run_at, timezone_name=item["timezone"])
+            await self.store.mark_schedule_run(item["schedule_id"], now.isoformat(), nxt.isoformat() if nxt else None)
 
     async def _loop(self):
         while True:

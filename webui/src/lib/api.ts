@@ -123,6 +123,7 @@ export const taskApi = {
   logs: (id:string) => api.get(`/tasks/${id}/logs`),
   pause: (id:string) => api.post(`/tasks/${id}/pause`),
   resume: (id:string) => api.post(`/tasks/${id}/resume`),
+  continueAfterLogin: (id:string) => api.post(`/tasks/${id}/continue-after-login`),
   cancel: (id:string) => api.post(`/tasks/${id}/cancel`),
   retry: (id:string) => api.post(`/tasks/${id}/retry-failed`),
 }
@@ -132,9 +133,15 @@ export const mediaApi = {
   remove: (id:string) => api.delete(`/media/${id}`, {params:{confirm:true}}),
 }
 export const libraryApi = {
-  awemes: (q='') => api.get<{items: import('@/types/crawler').Aweme[];total:number}>('/library/awemes',{params:{q}}),
+  awemes: (q='', filters:Record<string,unknown>={}) => api.get<{items: import('@/types/crawler').Aweme[];total:number}>('/library/awemes',{params:{q,...filters}}),
+  creators: (q='') => api.get('/library/creators',{params:{q}}),
+  topics: (q='') => api.get('/library/topics',{params:{q}}),
+  comments: (q='') => api.get('/library/comments',{params:{q}}),
+  transcripts: (q='') => api.get('/library/transcripts',{params:{q}}),
   detail: (id:string) => api.get(`/library/awemes/${id}`),
   search: (q:string) => api.get('/library/search',{params:{q}}),
+  stats: () => api.get('/library/stats'),
+  exportUrl: (format:'jsonl'|'csv',q='') => `/api/library/export?format=${format}&q=${encodeURIComponent(q)}`,
 }
 export const scheduleApi = {
   list: () => api.get<{items: Record<string,unknown>[]}>('/schedules'),
