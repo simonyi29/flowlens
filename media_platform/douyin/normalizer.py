@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any, Dict, Optional
 
 import config
@@ -34,6 +35,34 @@ SENSITIVE_KEYS = {
     "mobile",
     "phone",
     "email",
+    "authentication_token",
+    "access_token",
+    "refresh_token",
+    "passport_ticket",
+    "share_qrcode_url",
+    "homepage",
+    "homepage_url",
+    "profile_url",
+}
+
+SENSITIVE_ID_KEYS = {
+    "author_id",
+    "author_user_id",
+    "from_user_id",
+    "owner_id",
+    "social_author_id",
+    "social_share_user_id",
+    "to_user_id",
+}
+
+PERSON_PROFILE_MEDIA_KEYS = {
+    "avatar_168x168",
+    "avatar_300x300",
+    "avatar_large",
+    "avatar_medium",
+    "avatar_thumb",
+    "avatar_uri",
+    "cover_url",
 }
 
 
@@ -49,22 +78,48 @@ def optional_int(value: Any) -> Optional[int]:
         return None
 
 
-def sanitize_raw_payload(value: Any) -> Any:
+def sanitize_raw_payload(value: Any, *, _person_context: bool = False) -> Any:
     """Recursively remove identifiers and mask nicknames in an API response."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if "aweme-avatar" in stripped.lower() or "avatar/" in stripped.lower():
+            return None
+        if stripped.startswith(("{", "[")):
+            try:
+                nested = json.loads(stripped)
+            except json.JSONDecodeError:
+                return copy.deepcopy(value)
+            return json.dumps(
+                sanitize_raw_payload(nested, _person_context=_person_context),
+                ensure_ascii=False,
+            )
+        return copy.deepcopy(value)
     if isinstance(value, list):
-        return [sanitize_raw_payload(item) for item in value]
+        return [sanitize_raw_payload(item, _person_context=_person_context) for item in value]
     if not isinstance(value, dict):
         return copy.deepcopy(value)
 
     sanitized: Dict[str, Any] = {}
     for key, item in value.items():
         normalized_key = str(key).lower()
-        if normalized_key in SENSITIVE_KEYS:
+        is_person_context = _person_context or normalized_key in {
+            "author", "user", "user_info", "creator", "owner"
+        }
+        if (
+            normalized_key in SENSITIVE_KEYS
+            or normalized_key in SENSITIVE_ID_KEYS
+            or normalized_key.endswith("_token")
+            or normalized_key.endswith("_user_id")
+            or "sec_uid" in normalized_key
+            or "sec_user_id" in normalized_key
+            or "avatar" in normalized_key
+            or (is_person_context and normalized_key in PERSON_PROFILE_MEDIA_KEYS)
+        ):
             continue
         if normalized_key in {"nickname", "name", "screen_name"}:
             sanitized[key] = mask_nickname(item)
         else:
-            sanitized[key] = sanitize_raw_payload(item)
+            sanitized[key] = sanitize_raw_payload(item, _person_context=is_person_context)
     return sanitized
 
 

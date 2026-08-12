@@ -90,6 +90,40 @@ def test_sanitize_raw_payload_recursively_masks_names():
     assert sanitized == {"user": {"nickname": mask_nickname("测试昵称")}}
 
 
+def test_sanitize_raw_payload_removes_real_douyin_token_and_profile_media_shape():
+    sanitized = sanitize_raw_payload({
+        "authentication_token": "secret-token",
+        "author_user_id": "raw-author-id",
+        "author": {
+            "uid": "raw-uid",
+            "nickname": "创作者昵称",
+            "cover_url": [{"url_list": ["https://personal-cover"]}],
+            "avatar_large": {"url_list": ["https://avatar"]},
+            "share_info": {
+                "share_qrcode_url": {"url_list": ["https://personal-qr"]},
+            },
+        },
+        "video": {"play_addr": {"url_list": ["https://content-video"]}},
+        "music": {
+            "cover_hd": {
+                "url_list": ["https://p3.douyinpic.com/aweme-avatar/private.jpeg"]
+            },
+        },
+        "ent_log_extra": '{"aweme_log_extra":{"author_id":"nested-raw-id"}}',
+    })
+    raw_text = json.dumps(sanitized, ensure_ascii=False)
+    assert "secret-token" not in raw_text
+    assert "raw-author-id" not in raw_text
+    assert "raw-uid" not in raw_text
+    assert "personal-cover" not in raw_text
+    assert "https://avatar" not in raw_text
+    assert "personal-qr" not in raw_text
+    assert "nested-raw-id" not in raw_text
+    assert "aweme-avatar" not in raw_text
+    assert "https://content-video" in raw_text
+    assert sanitized["author"]["nickname"] == mask_nickname("创作者昵称")
+
+
 def test_sqlite_migration_is_idempotent(tmp_path):
     async def scenario():
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'old.db'}")
