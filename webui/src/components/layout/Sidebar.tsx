@@ -74,7 +74,7 @@ export function Sidebar({ onShowDisclaimer }: SidebarProps) {
           {/* Status Info */}
           <div className="hidden lg:flex items-center gap-2 text-xs font-mono">
             <span className="text-cyber-text-muted">{t('sidebar.api')}:</span>
-            <span className="text-cyber-neon-green">v1.1.0</span>
+            <span className="text-cyber-neon-green">v1.2.0</span>
             <div className="flex items-center gap-1.5">
               <Wifi className="w-3 h-3 text-cyber-text-secondary" />
               <span className="text-cyber-text-secondary">{t('sidebar.local')}</span>

@@ -20,6 +20,7 @@ from api.services.douyin_session_manager import (
 from tools.browser_launcher import BrowserLauncher
 from api.services.media_relay import MediaRelayBroker, parse_range, safe_media_path
 from api.main import app
+from api.worker import _control_websocket_url
 
 
 def test_browser_launcher_binds_cdp_to_loopback(monkeypatch, tmp_path):
@@ -37,6 +38,13 @@ def test_browser_launcher_binds_cdp_to_loopback(monkeypatch, tmp_path):
     launcher.launch_browser("chrome", 9222, user_data_dir=str(tmp_path))
     assert "--remote-debugging-address=127.0.0.1" in captured["args"]
     assert not any("0.0.0.0" in value for value in captured["args"])
+
+
+def test_worker_control_url_requires_tls_except_loopback():
+    assert _control_websocket_url("https://control.example.com") == "wss://control.example.com/internal/flowlens/workers/connect"
+    assert _control_websocket_url("http://127.0.0.1:8080") == "ws://127.0.0.1:8080/internal/flowlens/workers/connect"
+    with pytest.raises(ValueError):
+        _control_websocket_url("http://control.example.com")
 
 
 def test_worker_protocol_rejects_unknown_commands_and_expired_commands():
@@ -62,6 +70,8 @@ def test_worker_payload_sanitizer_removes_secrets_recursively():
     assert "secret" not in rendered and "bearer" not in rendered and "uid" not in rendered
     assert cleaned["nested"]["title"] == "safe"
     assert cleaned["items"][0]["content"] == "ok"
+    message = sanitize_worker_payload("Cookie=session-secret ws://127.0.0.1:9222/devtools/browser/x")
+    assert "session-secret" not in message and "9222" not in message
 
 
 def test_worker_event_has_id_and_sequence():
@@ -162,6 +172,13 @@ def test_remote_api_requires_trusted_proxy_and_isolates_users(monkeypatch, tmp_p
     created = client.post("/api/flowlens/douyin/login-sessions", json={"worker_id":"worker-1"}, headers=headers_a)
     assert created.status_code == 200
     session_id = created.json()["login_session_id"]
+    command = asyncio.run(store.pending_outbox_for_worker("worker-1"))[0]
+    command_body = json.loads(command["payload_json"])
+    assert command_body["type"] == "douyin.login.start"
+    assert command_body["payload"]["login_session_id"] == session_id
+    assert "expires_at" in command_body and "command_id" in command_body
+    command_body.pop("worker_id")
+    assert WorkerCommand.model_validate(command_body).payload["login_session_id"] == session_id
     douyin_session_manager.qr_store.put(session_id, b"png-data")
     assert client.get(f"/api/flowlens/douyin/login-sessions/{session_id}", headers=headers_a).status_code == 200
     assert client.get(f"/api/flowlens/douyin/login-sessions/{session_id}", headers=headers_b).status_code == 404
@@ -180,6 +197,11 @@ def test_remote_api_requires_trusted_proxy_and_isolates_users(monkeypatch, tmp_p
     run_id = run.json()["run_id"]
     assert client.get(f"/api/flowlens/crawl-runs/{run_id}", headers=headers_b).status_code == 404
     assert client.post(f"/api/flowlens/crawl-runs/{run_id}/pause", headers=headers_a).status_code == 200
+    rejected = client.post("/api/flowlens/crawl-runs", json={
+        "connection_id":session["connection_id"], "crawler_type":"search",
+        "keywords":"测试", "chrome_args":["--remote-debugging-address=0.0.0.0"],
+    }, headers=headers_a)
+    assert rejected.status_code == 422
 
 
 def test_worker_agent_executes_each_command_once(tmp_path):

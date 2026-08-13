@@ -5,6 +5,8 @@ import asyncio
 import json
 import base64
 import os
+import hashlib
+import shutil
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -50,6 +52,8 @@ class WorkerAgent:
                     "error_type": getattr(exc, "error_type", "unknown"),
                     "error_message": str(exc)[:500],
                 }
+        if command.payload.get("run_id"):
+            result["run_id"] = command.payload["run_id"]
         await self.store.enqueue_outbox("command.result", result)
         return result
 
@@ -66,6 +70,21 @@ class WorkerAgent:
 
     def stop(self) -> None:
         self._stop.set()
+
+    async def health_summary(self) -> dict[str, Any]:
+        from .douyin_session_manager import douyin_browser_slot, profile_directory
+        usage = shutil.disk_usage(profile_directory.root.parent if profile_directory.root.parent.exists() else self.store.path.parent)
+        try:
+            import faster_whisper  # noqa: F401
+            asr_available = True
+        except ImportError:
+            asr_available = False
+        return {
+            "browser_slot_busy":douyin_browser_slot.lock.locked(),
+            "free_disk_bytes":usage.free,
+            "ffprobe_available":shutil.which("ffprobe") is not None,
+            "asr_available":asr_available,
+        }
 
     def configure_default_handlers(self) -> None:
         from .douyin_session_manager import session_manager, profile_directory, managed_profile_runtime
@@ -98,15 +117,16 @@ class WorkerAgent:
                 "worker_id":self.worker_id,
             })
             task = session_manager.start_login(payload["login_session_id"])
-            last_status = None; qr_sent = False
+            last_status = None; qr_digest = None
             while not task.done():
                 item = await self.store.get_login_session(payload["login_session_id"])
                 png = session_manager.qr.get(payload["login_session_id"])
-                if png and not qr_sent and self.send_immediate:
+                current_digest = hashlib.sha256(png).hexdigest() if png else None
+                if png and current_digest != qr_digest and self.send_immediate:
                     await self.send_immediate({
                         "type":"qr.image","login_session_id":payload["login_session_id"],
                         "image_base64":base64.b64encode(png).decode(),
-                    }); qr_sent = True
+                    }); qr_digest = current_digest
                 if item and item["status"] != last_status and self.send_immediate:
                     last_status = item["status"]
                     await self.send_immediate({"type":"login.status","login_session_id":payload["login_session_id"],"status":last_status})
@@ -155,9 +175,26 @@ class WorkerAgent:
             await self.store.save_browser_profile({**profile, "status":"deleted", "pid":None, "cdp_port":None})
             return {"deleted":deleted}
 
+        async def profile_close(command: WorkerCommand):
+            profile_id = str(command.payload.get("profile_id") or "")
+            await session_manager.close_idle_profile(profile_id)
+            await managed_profile_runtime.stop(profile_id)
+            return {"closed":True}
+
         async def media_open(command: WorkerCommand):
             if not self.control_ws_url:
                 raise RuntimeError("media relay is not connected")
+            from .media_relay import safe_media_path, parse_range
+            item = await self.store.get_media(str(command.payload.get("asset_id") or ""))
+            try:
+                if not item: raise FileNotFoundError
+                path = safe_media_path(item.get("path"))
+                parse_range(command.payload.get("range"), path.stat().st_size)
+            except (FileNotFoundError, PermissionError, ValueError) as exc:
+                if self.send_immediate:
+                    status = "forbidden" if isinstance(exc, PermissionError) else "invalid_range" if isinstance(exc, ValueError) else "not_found"
+                    await self.send_immediate({"type":"media.status", "stream_id":command.payload.get("stream_id"), "status":status})
+                return {"accepted":False}
             asyncio.create_task(self._stream_media(command.payload))
             return {"accepted":True, "stream_id":command.payload.get("stream_id")}
 
@@ -170,6 +207,7 @@ class WorkerAgent:
         self.register_handler("crawl.cancel",crawl_cancel)
         self.register_handler("crawl.retry_failed",crawl_retry)
         self.register_handler("profile.delete",profile_delete)
+        self.register_handler("profile.close",profile_close)
         self.register_handler("media.open",media_open)
 
     async def _stream_media(self, payload: dict[str, Any]) -> None:
@@ -205,9 +243,23 @@ class WorkerAgent:
 
     async def _monitor_crawl(self, remote_run_id: str, local_run_id: str) -> None:
         last = None
+        sent_log_ids: set[int] = set()
         while True:
             item = await self.store.get_run(local_run_id)
             if not item: return
+            for log in reversed(await self.store.list_logs(local_run_id, 500)):
+                log_id = int(log["id"])
+                if log_id in sent_log_ids: continue
+                sent_log_ids.add(log_id)
+                await self.store.enqueue_outbox("result.log", {
+                    "worker_id":self.worker_id, "run_id":remote_run_id,
+                    "entity_type":"log", "entity_id":str(log_id),
+                    "payload":{
+                        "level":log.get("level"), "message":log.get("message"),
+                        "created_at":log.get("created_at"),
+                    },
+                    "observed_at":log.get("created_at"),
+                })
             state = (item["status"],item["stage"],item.get("error_type"),item.get("error_message"))
             if state != last and self.send_immediate:
                 await self.send_immediate({
@@ -234,29 +286,35 @@ class WorkerAgent:
             self.send_immediate = send
             async def heartbeat_loop():
                 while True:
-                    await send({"type":"heartbeat","worker_id":self.worker_id})
+                    await send({"type":"heartbeat","worker_id":self.worker_id,
+                                "capabilities":await self.health_summary()})
                     await asyncio.sleep(15)
             heartbeat = asyncio.create_task(heartbeat_loop())
             sent_results: set[str] = set()
             async def outbox_loop():
                 while True:
                     for message in await self.pending_messages():
-                        if not message["event_type"].startswith("result.") or message["event_id"] in sent_results:
+                        if message["event_id"] in sent_results:
                             continue
                         payload = message["payload"]
-                        await send({
-                            "type":"result.event","event_id":message["event_id"],
-                            "run_id":payload.get("run_id"),"entity_type":payload.get("entity_type"),
-                            "entity_id":payload.get("entity_id"),"payload":payload.get("payload") or {},
-                            "observed_at":payload.get("observed_at"),
-                        })
+                        if message["event_type"].startswith("result."):
+                            await send({
+                                "type":"result.event","event_id":message["event_id"],
+                                "run_id":payload.get("run_id"),"entity_type":payload.get("entity_type"),
+                                "entity_id":payload.get("entity_id"),"payload":payload.get("payload") or {},
+                                "observed_at":payload.get("observed_at"),
+                            })
+                        elif message["event_type"] == "command.result":
+                            await send({"type":"command.result", "outbox_event_id":message["event_id"], **payload})
+                        else:
+                            continue
                         sent_results.add(message["event_id"])
                     await asyncio.sleep(1)
             outbox = asyncio.create_task(outbox_loop())
             try:
                 async for raw in socket:
                     message = json.loads(raw)
-                    if message.get("type") == "result.ack":
+                    if message.get("type") in {"result.ack", "outbox.ack"}:
                         await self.store.ack_outbox_event(str(message.get("event_id") or "")); continue
                     if message.get("type") != "command": continue
                     payload = dict(message.get("payload") or {})

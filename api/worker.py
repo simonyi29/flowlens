@@ -22,6 +22,8 @@ def _control_websocket_url(control_url: str) -> str:
     parsed = urlparse(control_url.rstrip("/"))
     if parsed.scheme not in {"http", "https", "ws", "wss"} or not parsed.netloc:
         raise ValueError("control URL must be an absolute HTTPS/WSS URL")
+    if parsed.scheme in {"http", "ws"} and parsed.hostname not in {"127.0.0.1", "localhost"}:
+        raise ValueError("remote control URL must use TLS")
     scheme = "wss" if parsed.scheme in {"https", "wss"} else "ws"
     path = parsed.path.rstrip("/") + "/internal/flowlens/workers/connect"
     return urlunparse((scheme, parsed.netloc, path, "", "", ""))
@@ -37,6 +39,7 @@ def _save_config(config: dict) -> None:
 
 
 def register(control_url: str, enrollment_code: str, name: str) -> dict:
+    _control_websocket_url(control_url)
     identity = WorkerIdentityManager()
     public_key = identity.load_or_create()
     endpoint = control_url.rstrip("/") + "/internal/flowlens/workers/register"
@@ -63,10 +66,22 @@ async def run_agent(config_path: Path = WORKER_CONFIG) -> None:
     if not config_path.is_file():
         raise RuntimeError("worker is not registered; run `python -m api.worker register` first")
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    os.environ["FLOWLENS_WORKER_ID"] = str(config["worker_id"])
     await task_store.initialize()
-    agent = WorkerAgent(str(config["worker_id"]))
+    identity = WorkerIdentityManager()
+    public_key = identity.load_or_create()
+    await task_store.upsert_worker({
+        "worker_id":str(config["worker_id"]), "name":str(config.get("name") or "flowlens-worker"),
+        "public_key":public_key, "status":"online", "version":"1.2.0",
+        "protocol_version":str(config.get("protocol_version") or "1.0"),
+    })
+    agent = WorkerAgent(str(config["worker_id"]), identity=identity)
     agent.configure_default_handlers()
-    await agent.run_forever(_control_websocket_url(str(config["control_url"])))
+    try:
+        await agent.run_forever(_control_websocket_url(str(config["control_url"])))
+    finally:
+        from .services.douyin_session_manager import session_manager
+        await session_manager.close_all()
 
 
 def main() -> None:

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_VERSION = "1.0"
 WorkerCommandType = Literal[
@@ -17,6 +17,7 @@ WorkerCommandType = Literal[
 
 
 class WorkerCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     command_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     protocol_version: Literal["1.0"] = PROTOCOL_VERSION
     type: WorkerCommandType
@@ -36,6 +37,7 @@ class WorkerCommand(BaseModel):
 
 
 class WorkerEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     event_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     protocol_version: Literal["1.0"] = PROTOCOL_VERSION
     worker_id: str
@@ -48,14 +50,15 @@ class WorkerEvent(BaseModel):
 
 
 class BrowserProfileRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     profile_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     connection_id: str = Field(min_length=1, max_length=128)
     tenant_hash: str = Field(pattern=r"^[a-f0-9]{16}$")
 
 
 class WorkerRegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     enrollment_code: str = Field(min_length=16, max_length=256)
     name: str = Field(min_length=1, max_length=100)
     public_key: str = Field(min_length=32, max_length=4096)
     protocol_version: Literal["1.0"] = PROTOCOL_VERSION
-

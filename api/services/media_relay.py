@@ -12,6 +12,12 @@ MEDIA_ROOT = (Path(__file__).resolve().parents[2] / "data" / "douyin" / "media")
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
+class MediaRelayOpenError(RuntimeError):
+    def __init__(self, status: str):
+        self.status = status
+        super().__init__(status)
+
+
 def safe_media_path(value: str | None) -> Path:
     if not value:
         raise FileNotFoundError("media file is unavailable")

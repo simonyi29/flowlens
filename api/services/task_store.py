@@ -157,10 +157,24 @@ class TaskStore:
             );
             CREATE INDEX IF NOT EXISTS ix_remote_result_user ON remote_result(user_id, entity_type, synced_at);
             CREATE INDEX IF NOT EXISTS ix_remote_result_entity ON remote_result(user_id, entity_type, entity_id);
+            CREATE TABLE IF NOT EXISTS remote_entity (
+              user_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+              connection_id TEXT NOT NULL, run_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+              payload_json TEXT NOT NULL, source_event_id TEXT NOT NULL,
+              observed_at TEXT, synced_at TEXT NOT NULL,
+              PRIMARY KEY(user_id,entity_type,entity_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_remote_entity_type ON remote_entity(user_id,entity_type,synced_at);
+            CREATE TABLE IF NOT EXISTS task_schema_migrations (
+              version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+            );
             """)
             self._ensure_columns(db, "login_session", {"user_id":"TEXT", "worker_id":"TEXT"})
             self._ensure_columns(db, "sync_outbox", {"worker_id":"TEXT"})
             db.execute("UPDATE crawl_run SET status='partial', finished_at=? WHERE status IN ('running','pausing')", (_now(),))
+            db.execute("UPDATE browser_profile SET status='idle',pid=NULL,cdp_port=NULL,updated_at=? WHERE status='running'", (_now(),))
+            db.execute("UPDATE login_session SET status='failed',error_type='worker_restarted',error_message='Worker restarted before login completed',updated_at=? WHERE status IN ('starting_browser','opening_login_page','generating_qr','qr_ready','qr_scanned','checking_login')", (_now(),))
+            db.execute("INSERT OR IGNORE INTO task_schema_migrations(version,applied_at) VALUES('remote_worker_v1',?)", (_now(),))
 
     @staticmethod
     def _ensure_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -440,9 +454,12 @@ class TaskStore:
             (worker_id, limit),
         )
 
-    async def ack_outbox_event(self, event_id: str) -> None:
+    async def ack_outbox_event(self, event_id: str, worker_id: str | None = None) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._execute, "UPDATE sync_outbox SET status='acknowledged',acknowledged_at=? WHERE event_id=?", (_now(),event_id))
+            if worker_id:
+                await asyncio.to_thread(self._execute, "UPDATE sync_outbox SET status='acknowledged',acknowledged_at=? WHERE event_id=? AND worker_id=?", (_now(),event_id,worker_id))
+            else:
+                await asyncio.to_thread(self._execute, "UPDATE sync_outbox SET status='acknowledged',acknowledged_at=? WHERE event_id=?", (_now(),event_id))
 
     async def create_worker_enrollment(self, ttl_seconds: int = 600) -> str:
         import secrets
@@ -488,6 +505,13 @@ class TaskStore:
     async def get_profile_by_connection(self, connection_id: str):
         rows = await asyncio.to_thread(self._query, "SELECT * FROM browser_profile WHERE connection_id=?", (connection_id,))
         return rows[0] if rows else None
+
+    async def list_browser_profile_status(self):
+        return await asyncio.to_thread(
+            self._query,
+            "SELECT profile_id,connection_id,status,pid,cdp_port,last_checked_at,updated_at FROM browser_profile ORDER BY updated_at DESC",
+            (),
+        )
 
     async def save_login_session(self, item: dict[str, Any]) -> None:
         now = _now()
@@ -555,7 +579,19 @@ class TaskStore:
         return rows[0] if rows else None
 
     async def list_workers(self):
-        return await asyncio.to_thread(self._query, "SELECT worker_id,name,status,version,browser_slots,last_heartbeat_at FROM flowlens_worker WHERE revoked_at IS NULL ORDER BY registered_at")
+        return await asyncio.to_thread(self._query, "SELECT worker_id,name,status,version,browser_slots,last_heartbeat_at,capabilities_json FROM flowlens_worker WHERE revoked_at IS NULL ORDER BY registered_at")
+
+    async def revoke_worker(self, worker_id: str) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(self._revoke_worker_sync, worker_id)
+
+    def _revoke_worker_sync(self, worker_id: str) -> bool:
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE flowlens_worker SET status='revoked',revoked_at=? WHERE worker_id=? AND revoked_at IS NULL",
+                (_now(), worker_id),
+            )
+            return bool(cursor.rowcount)
 
     async def save_connection(self, item: dict[str, Any]) -> None:
         sql = """INSERT INTO douyin_connection(connection_id,user_id,worker_id,profile_id,status,creator_hash,masked_nickname,last_verified_at,created_at)
@@ -653,19 +689,30 @@ class TaskStore:
                 "INSERT OR IGNORE INTO remote_result(source_event_id,user_id,connection_id,run_id,worker_id,entity_type,entity_id,payload_json,observed_at,synced_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 values,
             )
+            if cursor.rowcount and values[5] not in {"aweme_metric", "creator_metric", "log"}:
+                db.execute(
+                    """INSERT INTO remote_entity(user_id,entity_type,entity_id,connection_id,run_id,worker_id,payload_json,source_event_id,observed_at,synced_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,entity_type,entity_id) DO UPDATE SET
+                    connection_id=excluded.connection_id,run_id=excluded.run_id,worker_id=excluded.worker_id,
+                    payload_json=excluded.payload_json,source_event_id=excluded.source_event_id,
+                    observed_at=excluded.observed_at,synced_at=excluded.synced_at""",
+                    (values[1],values[5],values[6],values[2],values[3],values[4],values[7],values[0],values[8],values[9]),
+                )
             return bool(cursor.rowcount)
 
     async def list_user_remote_results(self, user_id: str, entity_type: str, limit: int = 50, offset: int = 0):
+        table = "remote_result" if entity_type in {"aweme_metric", "creator_metric", "log"} else "remote_entity"
         return await asyncio.to_thread(
             self._query,
-            "SELECT source_event_id,run_id,entity_type,entity_id,payload_json,observed_at,synced_at FROM remote_result WHERE user_id=? AND entity_type=? ORDER BY synced_at DESC LIMIT ? OFFSET ?",
+            f"SELECT source_event_id,run_id,entity_type,entity_id,payload_json,observed_at,synced_at FROM {table} WHERE user_id=? AND entity_type=? ORDER BY synced_at DESC LIMIT ? OFFSET ?",
             (user_id,entity_type,limit,offset),
         )
 
     async def get_user_remote_result(self, user_id: str, entity_type: str, entity_id: str):
+        table = "remote_result" if entity_type in {"aweme_metric", "creator_metric", "log"} else "remote_entity"
         rows = await asyncio.to_thread(
             self._query,
-            "SELECT * FROM remote_result WHERE user_id=? AND entity_type=? AND entity_id=? ORDER BY synced_at DESC LIMIT 1",
+            f"SELECT * FROM {table} WHERE user_id=? AND entity_type=? AND entity_id=? ORDER BY synced_at DESC LIMIT 1",
             (user_id,entity_type,entity_id),
         )
         return rows[0] if rows else None

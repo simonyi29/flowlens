@@ -152,4 +152,28 @@ export const scheduleApi = {
 }
 export const systemApi = { health:()=>api.get('/system/health'), storage:()=>api.get('/system/storage') }
 
+const remoteHeaders = () => {
+  const token = import.meta.env.VITE_FLOWLENS_PROXY_TOKEN as string | undefined
+  const user = import.meta.env.VITE_FLOWLENS_USER_ID as string | undefined
+  return token && user ? {'X-FlowLens-Proxy-Token':token, 'X-FlowLens-User-ID':user} : {}
+}
+export const remoteApi = {
+  workers: () => api.get('/flowlens/workers',{headers:remoteHeaders()}),
+  connections: () => api.get('/flowlens/douyin/connections',{headers:remoteHeaders()}),
+  createLogin: (worker_id:string) => api.post('/flowlens/douyin/login-sessions',{worker_id},{headers:remoteHeaders()}),
+  login: (id:string) => api.get(`/flowlens/douyin/login-sessions/${id}`,{headers:remoteHeaders()}),
+  qr: (id:string) => api.get(`/flowlens/douyin/login-sessions/${id}/qr`,{headers:remoteHeaders(),responseType:'blob'}),
+  refreshLogin: (id:string) => api.post(`/flowlens/douyin/login-sessions/${id}/refresh`,{}, {headers:remoteHeaders()}),
+  cancelLogin: (id:string) => api.post(`/flowlens/douyin/login-sessions/${id}/cancel`,{}, {headers:remoteHeaders()}),
+  disconnect: (id:string) => api.delete(`/flowlens/douyin/connections/${id}`,{headers:remoteHeaders(),params:{confirm:true}}),
+  reconnect: (id:string) => api.post(`/flowlens/douyin/connections/${id}/login-session`,{}, {headers:remoteHeaders()}),
+  runs: () => api.get('/flowlens/crawl-runs',{headers:remoteHeaders()}),
+  createRun: (data:Record<string,unknown>) => api.post('/flowlens/crawl-runs',data,{headers:remoteHeaders()}),
+  control: (id:string, action:'pause'|'resume'|'cancel'|'retry-failed') => api.post(`/flowlens/crawl-runs/${id}/${action}`,{}, {headers:remoteHeaders()}),
+  results: (kind:string) => api.get(`/flowlens/results/${kind}`,{headers:remoteHeaders()}),
+  mediaUrl: (id:string) => `/api/flowlens/media/${id}/stream`,
+  enrollment: () => api.post('/flowlens/admin/worker-enrollments',{}, {headers:{...remoteHeaders(),'X-FlowLens-Role':'admin'}}),
+  adminWorkers: () => api.get('/flowlens/admin/workers',{headers:{...remoteHeaders(),'X-FlowLens-Role':'admin'}}),
+}
+
 export default api

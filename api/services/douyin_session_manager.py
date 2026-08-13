@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from tools.browser_launcher import BrowserLauncher
-from tools.user_hash import mask_nickname
+from tools.user_hash import anonymize_user_id, mask_nickname
 from .task_store import TaskStore, task_store
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -162,15 +162,27 @@ class PlaywrightDouyinLoginBrowser:
             return BrowserSessionState("risk_controlled", error_type="risk_controlled", message="抖音触发风险控制")
         cookies = await self.context.cookies(["https://www.douyin.com/"])
         has_session = any(cookie.get("name") in {"sessionid", "sessionid_ss", "sid_guard", "passport_csrf_token"} for cookie in cookies)
+        login_status_cookie = any(cookie.get("name") == "LOGIN_STATUS" and cookie.get("value") == "1" for cookie in cookies)
+        try:
+            local_storage_login = await self.page.evaluate("() => window.localStorage.getItem('HasUserLogin') === '1'")
+        except Exception:
+            local_storage_login = False
         login_buttons = await self.page.get_by_text("登录", exact=True).count()
-        if has_session and login_buttons == 0:
+        # A candidate session cookie alone is insufficient: require the page session flag
+        # (same low-frequency signal used by DouYinClient.pong) and no visible login entry.
+        if has_session and (login_status_cookie or local_storage_login) and login_buttons == 0:
             nickname = ""
+            creator_hash = ""
             for selector in ("[class*='avatar'] img[alt]", "[data-e2e='user-avatar'] img[alt]"):
                 locator = self.page.locator(selector)
                 if await locator.count():
                     nickname = (await locator.first.get_attribute("alt")) or ""
+                    link = locator.first.locator("xpath=ancestor::a[1]")
+                    if await link.count():
+                        creator_hash = anonymize_user_id((await link.get_attribute("href")) or "")
                     if nickname: break
-            return BrowserSessionState("logged_in", masked_nickname=mask_nickname(nickname) if nickname else "已连接账号")
+            return BrowserSessionState("logged_in", creator_hash=creator_hash or None,
+                                       masked_nickname=mask_nickname(nickname) if nickname else "已连接账号")
         qr_visible = False
         for selector in self.QR_SELECTORS:
             locator = self.page.locator(selector)
@@ -200,6 +212,8 @@ class ManagedDouyinSessionManager:
         self.browser_factory = browser_factory
         self.poll_interval = poll_interval
         self.tasks: dict[str, asyncio.Task] = {}
+        self.idle_browsers: dict[str, LoginBrowser] = {}
+        self.idle_close_tasks: dict[str, asyncio.Task] = {}
 
     def start_login(self, login_session_id: str) -> asyncio.Task:
         existing = self.tasks.get(login_session_id)
@@ -217,6 +231,7 @@ class ManagedDouyinSessionManager:
         if not profile:
             raise ValueError("browser profile not found")
         browser = self.browser_factory()
+        keep_open = False
         try:
             async with douyin_browser_slot.lock:
                 await self.store.update_login_session(login_session_id, "starting_browser")
@@ -237,11 +252,21 @@ class ManagedDouyinSessionManager:
                         await self.store.update_login_session(login_session_id, "expired")
                         self.qr.delete(login_session_id); return
                     state = await browser.check_state()
+                    if state.status == "qr_ready":
+                        try:
+                            refreshed_png = await browser.open_login_qr()
+                            if refreshed_png != self.qr.get(login_session_id):
+                                self.qr.put(login_session_id, refreshed_png)
+                        except Exception:
+                            pass
                     if state.status != latest["status"]:
                         await self.store.update_login_session(login_session_id, state.status, error_type=state.error_type, error_message=state.message)
                     if state.status == "logged_in":
                         await self.store.update_connection(item["connection_id"], "connected", creator_hash=state.creator_hash, masked_nickname=state.masked_nickname)
-                        self.qr.delete(login_session_id); return
+                        self.qr.delete(login_session_id)
+                        keep_open = True
+                        self._retain_idle_browser(profile["profile_id"], browser)
+                        return
                     if state.status in {"captcha_required", "risk_controlled"}:
                         await self.store.update_connection(item["connection_id"], "verification_required" if state.status == "captcha_required" else "risk_controlled")
                         self.qr.delete(login_session_id); return
@@ -254,7 +279,38 @@ class ManagedDouyinSessionManager:
             await self.store.update_login_session(login_session_id, "failed", error_type=getattr(exc, "error_type", "unknown"), error_message=str(exc)[:500])
             self.qr.delete(login_session_id)
         finally:
+            if not keep_open:
+                await browser.close()
+
+    def _retain_idle_browser(self, profile_id: str, browser: LoginBrowser) -> None:
+        previous = self.idle_close_tasks.pop(profile_id, None)
+        if previous and not previous.done(): previous.cancel()
+        self.idle_browsers[profile_id] = browser
+
+        async def close_later():
+            try:
+                await asyncio.sleep(300)
+                await self.close_idle_profile(profile_id)
+            except asyncio.CancelledError:
+                return
+
+        self.idle_close_tasks[profile_id] = asyncio.create_task(close_later())
+
+    async def close_idle_profile(self, profile_id: str) -> None:
+        task = self.idle_close_tasks.pop(profile_id, None)
+        if task and task is not asyncio.current_task() and not task.done(): task.cancel()
+        browser = self.idle_browsers.pop(profile_id, None)
+        if browser:
             await browser.close()
+            profile = await self.store.get_browser_profile(profile_id)
+            if profile:
+                await self.store.save_browser_profile({**profile, "status":"idle", "pid":None, "cdp_port":None})
+
+    async def close_all(self) -> None:
+        for task in tuple(self.tasks.values()):
+            if not task.done(): task.cancel()
+        for profile_id in tuple(self.idle_browsers):
+            await self.close_idle_profile(profile_id)
 
     async def cancel_login(self, login_session_id: str) -> bool:
         item = await self.store.get_login_session(login_session_id)
@@ -278,6 +334,7 @@ class ManagedProfileRuntime:
         profile = await self.store.get_browser_profile(profile_id)
         if not profile:
             raise ValueError("managed browser profile not found")
+        await session_manager.close_idle_profile(profile_id)
         path = self.profiles.ensure(profile["tenant_hash"], profile_id)
         launcher = BrowserLauncher()
         paths = launcher.detect_browser_paths()

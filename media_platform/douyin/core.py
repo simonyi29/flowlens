@@ -165,6 +165,8 @@ class DouYinCrawler(AbstractCrawler):
                 self.transcript_service = DouyinTranscriptService(self.dy_client.get_aweme_media)
                 await self.transcript_service.start()
             if not await self.dy_client.pong(browser_context=self.browser_context):
+                if os.getenv("FLOWLENS_MANAGED_PROFILE") == "1":
+                    raise RuntimeError("login_required: managed Douyin session is not valid")
                 login_obj = DouYinLogin(
                     login_type=config.LOGIN_TYPE,
                     login_phone="",  # you phone number

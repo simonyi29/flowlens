@@ -7,6 +7,7 @@ import binascii
 import json
 import os
 import secrets
+import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -15,7 +16,7 @@ from ..schemas.worker import WorkerRegisterRequest
 from ..services.task_store import task_store
 from ..services.worker_identity import verify_worker_signature
 from ..services import douyin_session_manager
-from ..services.media_relay import media_relay_broker
+from ..services.media_relay import MediaRelayOpenError, media_relay_broker
 from ..services.remote_events import remote_event_hub
 
 router = APIRouter(tags=["flowlens-worker-gateway"])
@@ -32,7 +33,7 @@ async def register_worker(request: WorkerRegisterRequest):
         raise HTTPException(401, "invalid or expired enrollment code")
     try:
         if len(base64.urlsafe_b64decode(request.public_key.encode())) != 32: raise ValueError
-    except ValueError:
+    except (ValueError, binascii.Error):
         raise HTTPException(422, "invalid Ed25519 public key")
     worker_id = f"worker_{uuid.uuid4().hex}"
     await task_store.upsert_worker({
@@ -42,23 +43,27 @@ async def register_worker(request: WorkerRegisterRequest):
     return {"worker_id":worker_id, "protocol_version":"1.0"}
 
 
-async def _set_worker_status(item: dict, status: str) -> None:
+async def _set_worker_status(item: dict, status: str, capabilities: dict | None = None) -> None:
     await task_store.upsert_worker({
         "worker_id":item["worker_id"], "name":item["name"], "public_key":item["public_key"],
         "status":status, "version":item.get("version"), "protocol_version":item.get("protocol_version","1.0"),
         "browser_slots":item.get("browser_slots",1),
+        "capabilities":capabilities if capabilities is not None else json.loads(item.get("capabilities_json") or "{}"),
     })
 
 
 async def _receive_worker_message(worker: dict, message: dict) -> dict | None:
     kind = message.get("type")
     if kind == "heartbeat":
-        await _set_worker_status(worker, "online")
+        await _set_worker_status(worker, "online", message.get("capabilities") or {})
     elif kind == "ack":
         event_id = str(message.get("event_id") or "")
-        if event_id: await task_store.ack_outbox_event(event_id)
+        if event_id: await task_store.ack_outbox_event(event_id, worker["worker_id"])
     elif kind == "qr.image":
         session_id = str(message.get("login_session_id") or "")
+        session = await task_store.get_login_session(session_id) if session_id else None
+        if not session or session.get("worker_id") != worker["worker_id"]:
+            return
         try: png = base64.b64decode(message.get("image_base64") or "", validate=True)
         except (ValueError, binascii.Error): return
         if session_id and png.startswith(b"\x89PNG\r\n\x1a\n") and len(png) <= 1024 * 1024:
@@ -66,6 +71,9 @@ async def _receive_worker_message(worker: dict, message: dict) -> dict | None:
             await task_store.update_login_session(session_id, "qr_ready")
     elif kind == "login.status":
         session_id, status = str(message.get("login_session_id") or ""), str(message.get("status") or "")
+        owned = await task_store.get_login_session(session_id) if session_id else None
+        if not owned or owned.get("worker_id") != worker["worker_id"]:
+            return
         if status in {"qr_ready","qr_scanned","phone_confirmation_required","logged_in","captcha_required","risk_controlled","expired","cancelled","failed"}:
             await task_store.update_login_session(session_id, status, error_type=message.get("error_type"), error_message=message.get("message"))
             item = await task_store.get_login_session(session_id)
@@ -85,6 +93,8 @@ async def _receive_worker_message(worker: dict, message: dict) -> dict | None:
             await task_store.update_remote_run(run_id,status,stage=message.get("stage"),error_type=message.get("error_type"),error_message=message.get("error_message"))
             run = await task_store.get_remote_run(run_id)
             if run:
+                if status == "waiting_for_login":
+                    await task_store.update_connection(run["connection_id"], "session_expired")
                 remote_event_hub.publish(run["user_id"], {
                     "event":"crawl.status", "run_id":run_id, "status":status,
                     "stage":message.get("stage"), "error_type":message.get("error_type"),
@@ -99,6 +109,8 @@ async def _receive_worker_message(worker: dict, message: dict) -> dict | None:
                 await task_store.update_remote_run(
                     run_id, "running", worker_run_id=str(worker_run_id)
                 )
+        if message.get("outbox_event_id"):
+            return {"type":"outbox.ack", "event_id":message["outbox_event_id"]}
     elif kind == "result.event":
         event_id, run_id = str(message.get("event_id") or ""), str(message.get("run_id") or "")
         run = await task_store.get_remote_run(run_id)
@@ -111,6 +123,10 @@ async def _receive_worker_message(worker: dict, message: dict) -> dict | None:
             "observed_at":message.get("observed_at"),
         })
         return {"type":"result.ack","event_id":event_id,"stored":stored}
+    elif kind == "media.status":
+        session = media_relay_broker.get(str(message.get("stream_id") or ""), worker["worker_id"])
+        if session and not session.ready.done():
+            session.ready.set_exception(MediaRelayOpenError(str(message.get("status") or "failed")))
     return None
 
 
@@ -132,16 +148,23 @@ async def worker_connect(websocket: WebSocket):
         await _set_worker_status(worker, "online")
         await websocket.send_json({"type":"authenticated", "worker_id":worker_id})
         sent: set[str] = set()
+        last_seen = time.monotonic()
         while True:
+            if time.monotonic() - last_seen > 45:
+                await websocket.close(code=1011, reason="heartbeat timeout")
+                break
             for row in await task_store.pending_outbox_for_worker(worker_id):
                 if row["event_id"] in sent: continue
+                command_payload = json.loads(row["payload_json"])
+                command_payload.pop("worker_id", None)
                 await websocket.send_json({
                     "type":"command", "event_id":row["event_id"], "sequence":row["sequence"],
-                    "payload":json.loads(row["payload_json"]),
+                    "payload":command_payload,
                 })
                 sent.add(row["event_id"])
             try:
                 message = await asyncio.wait_for(websocket.receive_json(), timeout=1)
+                last_seen = time.monotonic()
                 response = await _receive_worker_message(worker, message)
                 if response: await websocket.send_json(response)
             except asyncio.TimeoutError:

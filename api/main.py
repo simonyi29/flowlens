@@ -43,7 +43,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 app = FastAPI(
     title="FlowLens WebUI API",
     description="API for controlling FlowLens from WebUI",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 # Get webui static files directory
@@ -96,7 +96,7 @@ async def serve_frontend():
         return FileResponse(index_path)
     return {
         "message": "FlowLens WebUI API",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "docs": "/docs",
         "note": "WebUI not found, please build it first: cd webui && npm run build"
     }
@@ -225,4 +225,6 @@ if os.path.exists(WEBUI_DIR):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    # In remote-worker mode a reverse proxy is the only public control surface.
+    host = "127.0.0.1" if os.getenv("FLOWLENS_REMOTE_WORKER", "false").lower() in {"1","true","yes"} else "0.0.0.0"
+    uvicorn.run(app, host=host, port=8080)
