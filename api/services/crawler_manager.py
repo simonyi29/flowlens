@@ -28,6 +28,7 @@ import sys
 
 from ..schemas import CrawlerStartRequest, LogEntry
 from .task_store import task_store
+from .douyin_session_manager import douyin_browser_slot, managed_profile_runtime
 
 
 class CrawlerManager:
@@ -49,6 +50,7 @@ class CrawlerManager:
         self._project_root = Path(__file__).parent.parent.parent
         # Log queue - for pushing to WebSocket
         self._log_queue: Optional[asyncio.Queue] = None
+        self._managed_slot_acquired = False
 
     @property
     def logs(self) -> List[LogEntry]:
@@ -127,6 +129,16 @@ class CrawlerManager:
                 except asyncio.QueueEmpty:
                     pass
 
+            managed_cdp_port = None
+            if config.browser_mode == "managed_profile":
+                await douyin_browser_slot.lock.acquire()
+                self._managed_slot_acquired = True
+                try:
+                    managed_cdp_port = await managed_profile_runtime.start(str(config.browser_profile_id))
+                except Exception:
+                    self._release_managed_slot()
+                    raise
+
             # Build command line arguments
             cmd = self._build_command(config)
 
@@ -153,7 +165,7 @@ class CrawlerManager:
                     encoding='utf-8',
                     bufsize=1,
                     cwd=str(self._project_root),
-                    env={**os.environ, "PYTHONUNBUFFERED": "1", "FLOWLENS_RUN_ID": run_id},
+                    env=self._build_process_env(config, run_id, managed_cdp_port),
                     creationflags=creationflags,
                 )
 
@@ -173,11 +185,38 @@ class CrawlerManager:
 
                 return run_id
             except Exception as e:
+                await self._stop_managed_profile(config)
                 self.status = "error"
                 await task_store.update_run(run_id, "failed", error_type="unknown", error_message=str(e))
                 entry = self._create_log_entry(f"Failed to start crawler: {str(e)}", "error")
                 await self._push_log(entry)
                 return None
+
+    def _release_managed_slot(self) -> None:
+        if self._managed_slot_acquired:
+            self._managed_slot_acquired = False
+            if douyin_browser_slot.lock.locked():
+                douyin_browser_slot.lock.release()
+
+    async def _stop_managed_profile(self, config: CrawlerStartRequest | None = None) -> None:
+        target = config or self.current_config
+        if target and target.browser_mode == "managed_profile" and target.browser_profile_id:
+            await managed_profile_runtime.stop(str(target.browser_profile_id))
+        self._release_managed_slot()
+
+    def _build_process_env(self, config: CrawlerStartRequest, run_id: str,
+                           managed_cdp_port: int | None = None) -> dict[str, str]:
+        env = {**os.environ, "PYTHONUNBUFFERED":"1", "FLOWLENS_RUN_ID":run_id}
+        if config.browser_mode == "managed_profile":
+            env.update({
+                "FLOWLENS_MANAGED_PROFILE":"1",
+                "FLOWLENS_BROWSER_PROFILE_ID":str(config.browser_profile_id),
+                "FLOWLENS_CONNECTION_ID":str(config.connection_id or ""),
+                "FLOWLENS_WORKER_RUN_ID":str(config.worker_run_id or ""),
+            })
+            if managed_cdp_port is not None:
+                env["FLOWLENS_CDP_PORT"] = str(managed_cdp_port)
+        return env
 
     async def enqueue(self, config: CrawlerStartRequest) -> str:
         """Persist a run first, then launch it when the exclusive CDP slot is free."""
@@ -457,12 +496,14 @@ class CrawlerManager:
                         total=1, completed=1 if final_status == "completed" else 0,
                         failed=0 if final_status == "completed" else 1,
                     )
+                    await self._stop_managed_profile(self.current_config)
                     self.current_config = None
                     await self.start_next_queued()
 
         except asyncio.CancelledError:
             pass
         except Exception as e:
+            await self._stop_managed_profile(self.current_config)
             entry = self._create_log_entry(f"Error reading output: {str(e)}", "error")
             await self._push_log(entry)
 

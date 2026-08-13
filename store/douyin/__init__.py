@@ -22,6 +22,7 @@
 # @Time    : 2024/1/14 18:46
 # @Desc    :
 from typing import Dict, List
+import os
 
 import config
 from media_platform.douyin.normalizer import (
@@ -37,9 +38,22 @@ from model.m_douyin import (
 )
 from tools import utils
 from var import crawler_type_var
+from api.services.task_store import task_store
 
 from ._store_impl import *
 from .douyin_store_media import *
+
+
+async def _remote_result(entity_type: str, entity_id: str, payload: Dict):
+    remote_run_id = os.getenv("FLOWLENS_WORKER_RUN_ID", "")
+    if not remote_run_id:
+        return
+    await task_store.enqueue_outbox(f"result.{entity_type}", {
+        "worker_id":os.getenv("FLOWLENS_WORKER_ID", ""),
+        "run_id":remote_run_id, "entity_type":entity_type,
+        "entity_id":str(entity_id), "payload":payload,
+        "observed_at":payload.get("observed_at") or payload.get("collected_at"),
+    })
 
 
 class DouyinStoreFactory:
@@ -174,6 +188,7 @@ async def update_douyin_aweme(aweme_item: Dict):
     utils.logger.info(f"[store.douyin.update_douyin_aweme] douyin aweme id:{aweme_id}, title:{save_content_item.get('title')}")
     store = DouyinStoreFactory.create_store()
     await store.store_content(content_item=save_content_item)
+    await _remote_result("aweme", aweme_id, save_content_item)
     if hasattr(store, "store_aweme_metric"):
         metric = DouyinAwemeMetricSnapshotData(
             aweme_id=aweme_id,
@@ -187,6 +202,7 @@ async def update_douyin_aweme(aweme_item: Dict):
             source_mode=crawler_type_var.get(),
         )
         await store.store_aweme_metric(metric.model_dump())
+        await _remote_result("aweme_metric", aweme_id, metric.model_dump(mode="json"))
 
 
 async def batch_update_dy_aweme_comments(aweme_id: str, comments: List[Dict]):
@@ -210,6 +226,7 @@ async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
     utils.logger.info(f"[store.douyin.update_dy_aweme_comment] douyin aweme comment: {comment_id}, content: {save_comment_item.get('content')}")
 
     await DouyinStoreFactory.create_store().store_comment(comment_item=save_comment_item)
+    await _remote_result("comment", comment_id, save_comment_item)
 
 
 async def save_creator(user_id: str, creator: Dict):
@@ -220,6 +237,7 @@ async def save_creator(user_id: str, creator: Dict):
     store = DouyinStoreFactory.create_store()
     creator_item = normalized.model_dump(mode="json")
     await store.store_creator(creator_item)
+    await _remote_result("creator", normalized.creator_hash, creator_item)
     if hasattr(store, "store_creator_metric"):
         metric = DouyinCreatorMetricSnapshotData(
             creator_hash=normalized.creator_hash,
@@ -232,6 +250,7 @@ async def save_creator(user_id: str, creator: Dict):
             source_mode=crawler_type_var.get(),
         )
         await store.store_creator_metric(metric.model_dump())
+        await _remote_result("creator_metric", normalized.creator_hash, metric.model_dump(mode="json"))
 
 
 async def save_topic(topic: DouyinTopicData):
@@ -239,6 +258,7 @@ async def save_topic(topic: DouyinTopicData):
     if not hasattr(store, "store_topic"):
         raise ValueError("Douyin topic storage requires JSONL or SQLite")
     await store.store_topic(topic.model_dump(mode="json"))
+    await _remote_result("topic", topic.topic_id, topic.model_dump(mode="json"))
 
 
 async def save_transcript(transcript: DouyinTranscriptData):
@@ -246,6 +266,7 @@ async def save_transcript(transcript: DouyinTranscriptData):
     if not hasattr(store, "store_transcript"):
         raise ValueError("Douyin transcript storage requires JSONL or SQLite")
     await store.store_transcript(transcript.model_dump(mode="json"))
+    await _remote_result("transcript", transcript.aweme_id, transcript.model_dump(mode="json"))
 
 
 async def update_dy_aweme_image(aweme_id, pic_content, extension_file_name):

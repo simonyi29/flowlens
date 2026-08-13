@@ -17,6 +17,8 @@
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
+import os
+
 # Basic configuration
 PLATFORM = "xhs"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu
 
@@ -60,7 +62,7 @@ ENABLE_CDP_MODE = True
 
 # CDP 调试端口，用于与浏览器通信
 # 如果端口被占用，系统会自动尝试下一个可用端口
-CDP_DEBUG_PORT = 9222
+CDP_DEBUG_PORT = int(os.getenv("FLOWLENS_CDP_PORT", "9222"))
 
 # 自定义浏览器路径（可选）
 # 如果为空，系统会自动检测 Chrome/Edge 的安装路径

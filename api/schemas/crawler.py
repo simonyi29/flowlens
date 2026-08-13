@@ -106,6 +106,11 @@ class CrawlerStartRequest(BaseModel):
     enable_ip_proxy: bool = False
     static_proxy_url: str = ""
     schedule_id: Optional[str] = None
+    # Internal remote-worker references. They are never translated to CLI flags.
+    connection_id: Optional[str] = Field(default=None, max_length=128)
+    browser_profile_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    worker_run_id: Optional[str] = Field(default=None, max_length=128)
+    browser_mode: Literal["local", "managed_profile"] = "local"
 
     @model_validator(mode="after")
     def validate_douyin_options(self):
@@ -125,11 +130,15 @@ class CrawlerStartRequest(BaseModel):
             self.skip_existing_media, self.verify_media, self.keep_asr_source_media,
             self.incremental, self.stop_after_existing, self.refresh_existing_metrics,
             self.refresh_existing_comments,
+            self.connection_id, self.browser_profile_id, self.worker_run_id,
+            None if self.browser_mode == "local" else self.browser_mode,
         )
         if self.platform != PlatformEnum.DOUYIN and any(value not in (None, "") for value in douyin_values):
             raise ValueError("Douyin-specific options require platform=dy")
         if self.platform == PlatformEnum.DOUYIN and self.enable_asr:
             self.enable_native_subtitle = True
+        if self.browser_mode == "managed_profile" and not self.browser_profile_id:
+            raise ValueError("managed_profile browser mode requires browser_profile_id")
         return self
 
 

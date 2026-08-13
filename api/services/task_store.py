@@ -6,6 +6,7 @@ import json
 import sqlite3
 import uuid
 import hashlib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -144,8 +145,21 @@ class TaskStore:
               event_id TEXT PRIMARY KEY, worker_id TEXT NOT NULL, event_type TEXT NOT NULL,
               run_id TEXT, sequence INTEGER NOT NULL, received_at TEXT NOT NULL, processed_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS worker_enrollment (
+              code_hash TEXT PRIMARY KEY, expires_at TEXT NOT NULL, created_at TEXT NOT NULL,
+              used_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS remote_result (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, source_event_id TEXT NOT NULL UNIQUE,
+              user_id TEXT NOT NULL, connection_id TEXT NOT NULL, run_id TEXT NOT NULL,
+              worker_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+              payload_json TEXT NOT NULL, observed_at TEXT, synced_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_remote_result_user ON remote_result(user_id, entity_type, synced_at);
+            CREATE INDEX IF NOT EXISTS ix_remote_result_entity ON remote_result(user_id, entity_type, entity_id);
             """)
             self._ensure_columns(db, "login_session", {"user_id":"TEXT", "worker_id":"TEXT"})
+            self._ensure_columns(db, "sync_outbox", {"worker_id":"TEXT"})
             db.execute("UPDATE crawl_run SET status='partial', finished_at=? WHERE status IN ('running','pausing')", (_now(),))
 
     @staticmethod
@@ -335,6 +349,18 @@ class TaskStore:
         mime_type=excluded.mime_type,size_bytes=excluded.size_bytes,sha256=excluded.sha256,retry_count=excluded.retry_count,
         error_type=excluded.error_type,error_message=excluded.error_message,updated_at=excluded.updated_at"""
         async with self._lock: await asyncio.to_thread(self._execute, sql, values)
+        remote_run_id = os.getenv("FLOWLENS_WORKER_RUN_ID", "")
+        if remote_run_id and item.get("status") in {"completed", "deleted"}:
+            await self.enqueue_outbox("result.media", {
+                "worker_id":os.getenv("FLOWLENS_WORKER_ID", ""),
+                "run_id":remote_run_id, "entity_type":"media", "entity_id":asset_id,
+                "payload":{
+                    "asset_id":asset_id, "aweme_id":item["aweme_id"], "kind":item["kind"],
+                    "status":item.get("status", "completed"), "size_bytes":item.get("size_bytes", 0),
+                    "mime_type":item.get("mime_type"), "sha256":item.get("sha256"),
+                    "duration_ms":item.get("duration_ms"),
+                },
+            })
         return asset_id
 
     async def list_media(self, limit=100, offset=0, aweme_id: str | None = None):
@@ -386,9 +412,10 @@ class TaskStore:
         from .worker_security import sanitize_worker_payload
         event_id = event_id or uuid.uuid4().hex
         safe_payload = sanitize_worker_payload(payload)
-        sql = "INSERT OR IGNORE INTO sync_outbox(event_id,event_type,payload_json,status,created_at) VALUES(?,?,?,'pending',?)"
+        worker_id = payload.get("worker_id")
+        sql = "INSERT OR IGNORE INTO sync_outbox(event_id,event_type,payload_json,status,created_at,worker_id) VALUES(?,?,?,'pending',?,?)"
         async with self._lock:
-            await asyncio.to_thread(self._execute, sql, (event_id, event_type, json.dumps(safe_payload, ensure_ascii=False), _now()))
+            await asyncio.to_thread(self._execute, sql, (event_id, event_type, json.dumps(safe_payload, ensure_ascii=False), _now(), worker_id))
         return event_id
 
     async def pending_outbox(self, limit: int = 500):
@@ -405,6 +432,40 @@ class TaskStore:
                 "UPDATE sync_outbox SET status='acknowledged',acknowledged_at=? WHERE sequence<=? AND status<>'acknowledged'",
                 (_now(), through_sequence),
             )
+
+    async def pending_outbox_for_worker(self, worker_id: str, limit: int = 100):
+        return await asyncio.to_thread(
+            self._query,
+            "SELECT * FROM sync_outbox WHERE worker_id=? AND status IN ('pending','sending','failed') ORDER BY sequence LIMIT ?",
+            (worker_id, limit),
+        )
+
+    async def ack_outbox_event(self, event_id: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._execute, "UPDATE sync_outbox SET status='acknowledged',acknowledged_at=? WHERE event_id=?", (_now(),event_id))
+
+    async def create_worker_enrollment(self, ttl_seconds: int = 600) -> str:
+        import secrets
+        from datetime import timedelta
+        code = secrets.token_urlsafe(32)
+        digest = hashlib.sha256(code.encode()).hexdigest()
+        expires = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+        async with self._lock:
+            await asyncio.to_thread(self._execute, "INSERT INTO worker_enrollment(code_hash,expires_at,created_at) VALUES(?,?,?)", (digest,expires,_now()))
+        return code
+
+    async def consume_worker_enrollment(self, code: str) -> bool:
+        digest = hashlib.sha256(code.encode()).hexdigest()
+        async with self._lock:
+            return await asyncio.to_thread(self._consume_worker_enrollment_sync, digest)
+
+    def _consume_worker_enrollment_sync(self, digest: str) -> bool:
+        with self._connect() as db:
+            row = db.execute("SELECT expires_at,used_at FROM worker_enrollment WHERE code_hash=?", (digest,)).fetchone()
+            if not row or row["used_at"] or datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
+                return False
+            db.execute("UPDATE worker_enrollment SET used_at=? WHERE code_hash=? AND used_at IS NULL", (_now(),digest))
+            return True
 
     async def save_browser_profile(self, item: dict[str, Any]) -> None:
         now = _now()
@@ -515,6 +576,99 @@ class TaskStore:
             "SELECT connection_id,worker_id,status,creator_hash,masked_nickname,last_verified_at,created_at FROM douyin_connection WHERE user_id=? ORDER BY created_at DESC",
             (user_id,),
         )
+
+    async def get_connection(self, connection_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM douyin_connection WHERE connection_id=?", (connection_id,))
+        return rows[0] if rows else None
+
+    async def get_user_connection(self, connection_id: str, user_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM douyin_connection WHERE connection_id=? AND user_id=?", (connection_id, user_id))
+        return rows[0] if rows else None
+
+    async def update_connection(self, connection_id: str, status: str, *, creator_hash: str | None = None,
+                                masked_nickname: str | None = None) -> None:
+        verified = _now() if status == "connected" else None
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE douyin_connection SET status=?,creator_hash=COALESCE(?,creator_hash),masked_nickname=COALESCE(?,masked_nickname),last_verified_at=COALESCE(?,last_verified_at) WHERE connection_id=?",
+                (status, creator_hash, masked_nickname, verified, connection_id),
+            )
+
+    async def create_remote_run(self, item: dict[str, Any]) -> str:
+        run_id = item.get("run_id") or uuid.uuid4().hex
+        safe = dict(item["config"])
+        for key in ("cookies", "static_proxy_url", "browser_profile_id"):
+            safe.pop(key, None)
+        values = (
+            run_id, item["user_id"], item["connection_id"], item["worker_id"],
+            item.get("worker_run_id"), item.get("status", "queued"), item.get("stage", "discover"),
+            json.dumps(safe, ensure_ascii=False), _now(),
+        )
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "INSERT INTO remote_crawl_run(run_id,user_id,connection_id,worker_id,worker_run_id,status,stage,sanitized_config_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                values,
+            )
+        return run_id
+
+    async def get_user_remote_run(self, run_id: str, user_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM remote_crawl_run WHERE run_id=? AND user_id=?", (run_id, user_id))
+        return rows[0] if rows else None
+
+    async def get_remote_run(self, run_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM remote_crawl_run WHERE run_id=?", (run_id,))
+        return rows[0] if rows else None
+
+    async def list_user_remote_runs(self, user_id: str):
+        return await asyncio.to_thread(self._query, "SELECT * FROM remote_crawl_run WHERE user_id=? ORDER BY created_at DESC", (user_id,))
+
+    async def update_remote_run(self, run_id: str, status: str, *, stage: str | None = None,
+                                error_type: str | None = None, error_message: str | None = None,
+                                worker_run_id: str | None = None) -> None:
+        fields, values = ["status=?", "error_type=?", "error_message=?"], [status,error_type,error_message]
+        if stage: fields.append("stage=?"); values.append(stage)
+        if worker_run_id: fields.append("worker_run_id=?"); values.append(worker_run_id)
+        if status == "running": fields.append("started_at=COALESCE(started_at,?)"); values.append(_now())
+        if status in {"completed","failed","partial","cancelled"}: fields.append("finished_at=?"); values.append(_now())
+        values.append(run_id)
+        async with self._lock:
+            await asyncio.to_thread(self._execute, f"UPDATE remote_crawl_run SET {','.join(fields)} WHERE run_id=?", values)
+
+    async def store_remote_result(self, item: dict[str, Any]) -> bool:
+        from .worker_security import sanitize_worker_payload
+        payload = sanitize_worker_payload(item["payload"])
+        values = (
+            item["source_event_id"],item["user_id"],item["connection_id"],item["run_id"],
+            item["worker_id"],item["entity_type"],item["entity_id"],json.dumps(payload,ensure_ascii=False),
+            item.get("observed_at"),_now(),
+        )
+        async with self._lock:
+            return await asyncio.to_thread(self._store_remote_result_sync, values)
+
+    def _store_remote_result_sync(self, values: tuple) -> bool:
+        with self._connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO remote_result(source_event_id,user_id,connection_id,run_id,worker_id,entity_type,entity_id,payload_json,observed_at,synced_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                values,
+            )
+            return bool(cursor.rowcount)
+
+    async def list_user_remote_results(self, user_id: str, entity_type: str, limit: int = 50, offset: int = 0):
+        return await asyncio.to_thread(
+            self._query,
+            "SELECT source_event_id,run_id,entity_type,entity_id,payload_json,observed_at,synced_at FROM remote_result WHERE user_id=? AND entity_type=? ORDER BY synced_at DESC LIMIT ? OFFSET ?",
+            (user_id,entity_type,limit,offset),
+        )
+
+    async def get_user_remote_result(self, user_id: str, entity_type: str, entity_id: str):
+        rows = await asyncio.to_thread(
+            self._query,
+            "SELECT * FROM remote_result WHERE user_id=? AND entity_type=? AND entity_id=? ORDER BY synced_at DESC LIMIT 1",
+            (user_id,entity_type,entity_id),
+        )
+        return rows[0] if rows else None
 
     async def save_schedule(self, item: dict[str, Any], schedule_id: str | None = None) -> str:
         schedule_id = schedule_id or uuid.uuid4().hex
