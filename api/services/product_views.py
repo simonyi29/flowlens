@@ -76,10 +76,10 @@ def allowed_actions(status: str, failed_count: int = 0) -> list[str]:
         "paused": ["resume", "cancel"],
         "waiting_for_login": ["reconnect", "continue_after_login", "cancel"],
         "waiting_for_space": ["resume", "cancel"],
-        "partial": ["view_failures", "retry_failed"] if failed_count else ["view_details", "rerun"],
-        "completed": ["view_results", "rerun"],
-        "failed": ["view_error", "retry_failed"],
-        "cancelled": ["rerun"],
+        "partial": (["view_failures", "retry_failed"] if failed_count else ["view_details", "rerun"]) + ["delete_history"],
+        "completed": ["view_results", "rerun", "delete_history"],
+        "failed": ["view_error", "retry_failed", "delete_history"],
+        "cancelled": ["rerun", "delete_history"],
     }.get(status, [])
 
 
@@ -120,6 +120,12 @@ def present_run(
     if status in {"partial", "failed"} and run.get("error_type") and not failed_count:
         failed_count = 1
     summary = summary or {}
+    actions = allowed_actions(status, failed_count)
+    if not source_summary:
+        # Very old runs did not retain the keyword/topic/account source. A
+        # blank rerun would not reproduce the original job, so keep only
+        # actions that are honest and safe for that history record.
+        actions = [action for action in actions if action != "rerun"]
     return {
         **run,
         "display_name": display_name,
@@ -136,7 +142,7 @@ def present_run(
         },
         "stage_counts": stage_counts,
         "failed_count": failed_count,
-        "allowed_actions": allowed_actions(status, failed_count),
+        "allowed_actions": actions,
         "estimated_remaining_seconds": summary.get("estimated_remaining_seconds"),
         "elapsed_seconds": summary.get("elapsed_seconds"),
         "downloaded_bytes": summary.get("downloaded_bytes", 0),
@@ -148,6 +154,7 @@ def safe_error(error_type: str | None, detail: str | None) -> dict[str, Any] | N
     if not error_type and not detail:
         return None
     messages = {
+        "cancelled": ("任务已由用户取消，已保存的数据不受影响。", True, "rerun"),
         "login_required": ("抖音登录已失效，请重新扫码后继续任务。", True, "reconnect"),
         "captcha_required": ("账号需要人工验证，请等待管理员处理。", True, "contact_admin"),
         "risk_controlled": ("抖音暂时限制了当前会话，请稍后重试或联系管理员。", True, "contact_admin"),

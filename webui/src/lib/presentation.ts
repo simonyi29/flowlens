@@ -27,6 +27,7 @@ export const actionLabels: Record<TaskAllowedAction, string> = {
   continue_after_login: '登录后继续', view_failures: '查看失败项', retry_failed: '只重试失败项',
   view_results: '查看结果', rerun: '再次运行', view_error: '查看原因',
   view_details: '查看详情',
+  delete_history: '删除记录',
 }
 
 export const stageLabels: Record<string, string> = {

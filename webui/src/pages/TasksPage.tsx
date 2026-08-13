@@ -3,10 +3,11 @@ import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   AlertCircle, ChevronLeft, ChevronRight, Clock3, Eye, Pause, Play,
-  RefreshCw, RotateCcw, Square, SquareStack,
+  RefreshCw, RotateCcw, Square, SquareStack, Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { EmptyState, PageHeader, ProgressBar, StatusBadge, Surface } from '@/components/product/Primitives'
 import { remoteApi, taskApi } from '@/lib/api'
 import { useCapabilities } from '@/hooks/useProduct'
@@ -31,6 +32,8 @@ export default function TasksPage() {
   const [total, setTotal] = useState(0)
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
+  const [deleteTarget, setDeleteTarget] = useState<TaskSummary | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const load = useCallback(async (quiet = false) => {
     if (!capabilities.data) return
@@ -68,10 +71,23 @@ export default function TasksPage() {
     : statusCounts[status] || 0
 
   const control = async (run: TaskSummary, action: TaskAllowedAction) => {
-    if (action === 'rerun') { navigate(`/crawl/new?mode=${run.crawler_type || 'search'}`); return }
+    if (action === 'rerun') {
+      try {
+        const response = remote ? await remoteApi.rerun(run.run_id) : await taskApi.rerun(run.run_id)
+        toast.success(t('tasks.rerunCreated'))
+        navigate(`/tasks/${response.data.run_id}`)
+      } catch {
+        toast.error(t('tasks.rerunRejected'))
+      }
+      return
+    }
     if (action === 'view_results') { navigate('/library'); return }
     if (['view_failures', 'view_error', 'view_details'].includes(action)) { navigate(`/tasks/${run.run_id}`); return }
     if (action === 'reconnect') { navigate('/connect'); return }
+    if (action === 'delete_history') {
+      setDeleteTarget(run)
+      return
+    }
     if (action === 'cancel' && !window.confirm(t('tasks.cancelConfirm'))) return
     try {
       if (remote) {
@@ -85,6 +101,22 @@ export default function TasksPage() {
       await load(true)
     } catch {
       toast.error(t('tasks.operationRejected'))
+    }
+  }
+
+  const deleteHistory = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    try {
+      if (remote) await remoteApi.removeRunHistory(deleteTarget.run_id)
+      else await taskApi.removeHistory(deleteTarget.run_id)
+      toast.success(t('tasks.deleteSuccess'))
+      setDeleteTarget(null)
+      await load(true)
+    } catch {
+      toast.error(t('tasks.deleteRejected'))
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -125,6 +157,7 @@ export default function TasksPage() {
         action={!loading ? <Button asChild><Link to="/crawl/new">{t('tasks.newCrawl')}</Link></Button> : undefined}
       />}
     </Surface>
+    <Dialog open={Boolean(deleteTarget)} onOpenChange={open => { if (!open && !deleting) setDeleteTarget(null) }}><DialogContent className="border-slate-200 bg-white text-slate-900 sm:max-w-md"><DialogHeader><DialogTitle className="font-sans text-lg text-slate-950">{t('tasks.deleteTitle')}</DialogTitle><DialogDescription className="leading-6 text-slate-600">{t('tasks.deleteConfirm')}</DialogDescription></DialogHeader>{deleteTarget ? <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-700">{deleteTarget.display_name} · {t(`tasks.status.${deleteTarget.status}`)}</div> : null}<DialogFooter className="gap-2 sm:space-x-0"><Button variant="outline" disabled={deleting} onClick={() => setDeleteTarget(null)}>{t('tasks.deleteCancel')}</Button><Button variant="destructive" disabled={deleting} onClick={() => void deleteHistory()}>{deleting ? <RefreshCw className="animate-spin"/> : <Trash2/>}{deleting ? t('tasks.deleting') : t('tasks.deleteAction')}</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
 
@@ -134,7 +167,8 @@ function TaskRow({ run, locale, onAction }: {
   onAction: (run: TaskSummary, action: TaskAllowedAction) => void
 }) {
   const { t } = useTranslation('product')
-  const visible = run.allowed_actions.filter(action => action !== 'continue_after_login').slice(0, 2)
+  const primaryActions = run.allowed_actions.filter(action => !['continue_after_login', 'delete_history', 'view_details'].includes(action)).slice(0, 2)
+  const canDelete = run.allowed_actions.includes('delete_history')
   const crawlerType = ['search', 'topic', 'detail', 'creator'].includes(run.crawler_type || '') ? run.crawler_type! : 'search'
   const displayName = run.source_missing
     ? t(`tasks.name.legacy_${crawlerType}`)
@@ -162,10 +196,12 @@ function TaskRow({ run, locale, onAction }: {
       <p>{date}</p><p className="mt-1 flex items-center gap-1"><Clock3 className="h-3.5 w-3.5"/><span>{duration}</span></p>
     </div>
     <div className="col-span-2 flex flex-wrap gap-2 sm:col-span-1 sm:col-start-3 sm:row-span-2 sm:row-start-1 sm:items-center sm:justify-end xl:col-start-5 xl:row-start-1">
-      {visible.map(action => <Button key={action} size="sm" variant={action === 'cancel' ? 'ghost' : action === 'retry_failed' ? 'outline' : 'secondary'} onClick={() => onAction(run, action)}>
+      <Button asChild size="sm" variant="ghost"><Link to={`/tasks/${run.run_id}`}><Eye/>{t('tasks.action.view_details')}</Link></Button>
+      {primaryActions.map(action => <Button key={action} size="sm" variant={action === 'cancel' ? 'ghost' : action === 'retry_failed' ? 'outline' : 'secondary'} onClick={() => onAction(run, action)}>
         {action === 'pause' ? <Pause/> : action === 'resume' ? <Play/> : action === 'cancel' ? <Square/> : action === 'retry_failed' || action === 'rerun' ? <RotateCcw/> : action === 'view_error' ? <AlertCircle/> : action === 'view_details' || action === 'view_failures' || action === 'view_results' ? <Eye/> : null}
         {t(`tasks.action.${action}`)}
       </Button>)}
+      {canDelete ? <Button size="sm" variant="ghost" className="text-red-700 hover:bg-red-50 hover:text-red-800" onClick={() => onAction(run, 'delete_history')}><Trash2/><span className="xl:sr-only">{t('tasks.action.delete_history')}</span></Button> : null}
     </div>
   </article>
 }

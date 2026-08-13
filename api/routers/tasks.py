@@ -93,3 +93,20 @@ async def retry_failed(run_id: str):
     if not new_run_id:
         raise HTTPException(409, "Task cannot be retried")
     return {"status": "queued", "run_id": new_run_id}
+
+
+@router.post("/{run_id}/rerun")
+async def rerun_task(run_id: str):
+    new_run_id = await crawler_manager.rerun(run_id)
+    if not new_run_id:
+        raise HTTPException(409, "Task cannot be run again")
+    return {"status": "queued", "run_id": new_run_id, "source_run_id": run_id}
+
+
+@router.delete("/{run_id}")
+async def delete_task_history(run_id: str, confirm: bool = False):
+    if not confirm:
+        raise HTTPException(409, "Explicit confirmation is required")
+    if not await task_store.delete_run_history(run_id):
+        raise HTTPException(409, "Only finished task history can be deleted")
+    return {"status": "deleted", "run_id": run_id, "results_preserved": True}

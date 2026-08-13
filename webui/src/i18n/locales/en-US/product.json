@@ -157,7 +157,8 @@
       "view_results": "View results",
       "rerun": "Run again",
       "view_error": "View error",
-      "view_details": "View details"
+      "view_details": "View details",
+      "delete_history": "Delete record"
     },
     "name": {
       "search": "Keyword: {{value}}",
@@ -188,6 +189,15 @@
     "pageSummary": "Page {{page}} of {{pages}} · {{total}} tasks",
     "cancelConfirm": "Cancelling will not remove data that has already been saved. Continue?",
     "operationSubmitted": "Task action submitted",
-    "operationRejected": "This action is not available for the current task state"
+    "operationRejected": "This action is not available for the current task state",
+    "rerunCreated": "A new task was created with the original configuration",
+    "rerunRejected": "The original account or worker is unavailable, so the task cannot run again",
+    "deleteConfirm": "Delete only this task record? Collected content and media will be kept.",
+    "deleteTitle": "Delete task record?",
+    "deleteCancel": "Keep record",
+    "deleteAction": "Confirm delete",
+    "deleting": "Deleting",
+    "deleteSuccess": "Task record deleted; collected results were kept",
+    "deleteRejected": "Only finished task records can be deleted"
   }
 }

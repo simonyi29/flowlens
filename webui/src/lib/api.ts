@@ -126,6 +126,8 @@ export const taskApi = {
   continueAfterLogin: (id:string) => api.post(`/tasks/${id}/continue-after-login`),
   cancel: (id:string) => api.post(`/tasks/${id}/cancel`),
   retry: (id:string) => api.post(`/tasks/${id}/retry-failed`),
+  rerun: (id:string) => api.post<{status:string;run_id:string;source_run_id:string}>(`/tasks/${id}/rerun`),
+  removeHistory: (id:string) => api.delete(`/tasks/${id}`, {params:{confirm:true}}),
 }
 export const mediaApi = {
   list: (params: {limit?:number;offset?:number;q?:string;kind?:string;status?:string;sort?:string;aweme_id?:string} = {}) => api.get<import('@/types/product').MediaListResponse>('/media',{params}),
@@ -188,6 +190,8 @@ export const remoteApi = {
   runLogs: (id:string) => api.get(`/flowlens/crawl-runs/${id}/logs`,{headers:remoteHeaders()}),
   createRun: (data:Record<string,unknown>) => api.post('/flowlens/crawl-runs',data,{headers:remoteHeaders()}),
   control: (id:string, action:'pause'|'resume'|'cancel'|'retry-failed') => api.post(`/flowlens/crawl-runs/${id}/${action}`,{}, {headers:remoteHeaders()}),
+  rerun: (id:string) => api.post<{status:string;run_id:string;source_run_id:string}>(`/flowlens/crawl-runs/${id}/rerun`,{}, {headers:remoteHeaders()}),
+  removeRunHistory: (id:string) => api.delete(`/flowlens/crawl-runs/${id}`, {headers:remoteHeaders(),params:{confirm:true}}),
   results: (kind:string, params: {limit?:number;offset?:number} = {}) => api.get(`/flowlens/results/${kind}`,{headers:remoteHeaders(),params}),
   resultDetail: (id:string) => api.get(`/flowlens/results/aweme/${id}/detail`,{headers:remoteHeaders()}),
   mediaUrl: (id:string) => `/api/flowlens/media/${id}/stream`,

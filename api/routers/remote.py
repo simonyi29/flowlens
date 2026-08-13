@@ -445,6 +445,51 @@ async def cancel_run(run_id: str, user_id: str = Depends(current_user)): return 
 async def retry_run(run_id: str, user_id: str = Depends(current_user)): return await _control_run(run_id,"retry_failed",user_id)
 
 
+@router.post("/crawl-runs/{run_id}/rerun")
+async def rerun_remote_crawl(run_id: str, user_id: str = Depends(current_user)):
+    item = await task_store.get_user_remote_run(run_id, user_id)
+    if not item:
+        raise HTTPException(404, "crawl run not found")
+    if item["status"] not in {"completed", "cancelled", "partial"}:
+        raise HTTPException(409, "crawl run cannot be run again")
+    connection = await task_store.get_user_connection(item["connection_id"], user_id)
+    if not connection or connection["status"] != "connected":
+        raise HTTPException(409, "Douyin connection is not ready")
+    worker = await task_store.get_worker(connection["worker_id"])
+    if not worker or worker["status"] != "online":
+        raise HTTPException(503, "worker is offline")
+    config = json.loads(item["sanitized_config_json"])
+    new_run_id = await task_store.create_remote_run({
+        "user_id": user_id,
+        "connection_id": item["connection_id"],
+        "worker_id": connection["worker_id"],
+        "config": config,
+    })
+    await _enqueue_worker_command(connection["worker_id"], "crawl.start", {
+        "run_id": new_run_id,
+        "connection_id": item["connection_id"],
+        "browser_profile_id": connection["profile_id"],
+        "config": config,
+    }, 86_400)
+    return {"status": "queued", "run_id": new_run_id, "source_run_id": run_id}
+
+
+@router.delete("/crawl-runs/{run_id}")
+async def delete_remote_crawl_history(
+    run_id: str,
+    confirm: bool = False,
+    user_id: str = Depends(current_user),
+):
+    item = await task_store.get_user_remote_run(run_id, user_id)
+    if not item:
+        raise HTTPException(404, "crawl run not found")
+    if not confirm:
+        raise HTTPException(409, "explicit confirmation is required")
+    if not await task_store.delete_user_remote_run_history(run_id, user_id):
+        raise HTTPException(409, "only finished crawl history can be deleted")
+    return {"status": "deleted", "run_id": run_id, "results_preserved": True}
+
+
 @router.post("/crawl-runs/{run_id}/continue-after-verification")
 async def continue_after_verification(run_id: str, user_id: str = Depends(current_user)):
     return await _control_run(run_id, "resume", user_id)

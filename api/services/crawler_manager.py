@@ -231,6 +231,14 @@ class CrawlerManager:
             await self.start_next_queued()
         return run_id
 
+    async def rerun(self, run_id: str) -> str | None:
+        """Create a new run from a finished run's sanitized config snapshot."""
+        item = await task_store.get_run(run_id)
+        if not item or item["status"] not in {"completed", "cancelled", "partial"}:
+            return None
+        config = CrawlerStartRequest.model_validate(json.loads(item["config_json"]))
+        return await self.enqueue(config)
+
     async def start_next_queued(self) -> str | None:
         if self.process and self.process.poll() is None:
             return None

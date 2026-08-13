@@ -302,6 +302,22 @@ class TaskStore:
         rows = await asyncio.to_thread(self._query, "SELECT * FROM crawl_run WHERE run_id=?", (run_id,))
         return rows[0] if rows else None
 
+    async def delete_run_history(self, run_id: str) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(self._delete_run_history_sync, run_id)
+
+    def _delete_run_history_sync(self, run_id: str) -> bool:
+        terminal = {"completed", "cancelled", "partial", "failed"}
+        with self._connect() as db:
+            row = db.execute("SELECT status FROM crawl_run WHERE run_id=?", (run_id,)).fetchone()
+            if not row or row["status"] not in terminal:
+                return False
+            db.execute("DELETE FROM task_log WHERE run_id=?", (run_id,))
+            db.execute("DELETE FROM crawl_task_item WHERE run_id=?", (run_id,))
+            db.execute("DELETE FROM crawl_task WHERE run_id=?", (run_id,))
+            cursor = db.execute("DELETE FROM crawl_run WHERE run_id=?", (run_id,))
+            return bool(cursor.rowcount)
+
     async def next_queued_run(self):
         rows = await asyncio.to_thread(
             self._query,
@@ -793,6 +809,29 @@ class TaskStore:
     async def get_remote_run(self, run_id: str):
         rows = await asyncio.to_thread(self._query, "SELECT * FROM remote_crawl_run WHERE run_id=?", (run_id,))
         return rows[0] if rows else None
+
+    async def delete_user_remote_run_history(self, run_id: str, user_id: str) -> bool:
+        terminal = {"completed", "cancelled", "partial", "failed"}
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._delete_user_remote_run_history_sync, run_id, user_id, terminal,
+            )
+
+    def _delete_user_remote_run_history_sync(
+        self, run_id: str, user_id: str, terminal: set[str],
+    ) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT status FROM remote_crawl_run WHERE run_id=? AND user_id=?",
+                (run_id, user_id),
+            ).fetchone()
+            if not row or row["status"] not in terminal:
+                return False
+            cursor = db.execute(
+                "DELETE FROM remote_crawl_run WHERE run_id=? AND user_id=?",
+                (run_id, user_id),
+            )
+            return bool(cursor.rowcount)
 
     async def list_user_remote_runs(
         self,

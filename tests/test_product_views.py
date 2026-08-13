@@ -30,10 +30,10 @@ def test_task_view_has_readable_name_progress_and_state_actions():
 
 
 def test_allowed_actions_are_strictly_state_specific():
-    assert allowed_actions("completed") == ["view_results", "rerun"]
+    assert allowed_actions("completed") == ["view_results", "rerun", "delete_history"]
     assert "pause" not in allowed_actions("completed")
-    assert allowed_actions("partial", failed_count=1) == ["view_failures", "retry_failed"]
-    assert allowed_actions("partial") == ["view_details", "rerun"]
+    assert allowed_actions("partial", failed_count=1) == ["view_failures", "retry_failed", "delete_history"]
+    assert allowed_actions("partial") == ["view_details", "rerun", "delete_history"]
     assert allowed_actions("waiting_for_login") == ["reconnect", "continue_after_login", "cancel"]
 
 
@@ -49,7 +49,7 @@ def test_legacy_run_has_honest_name_and_indeterminate_progress():
     assert view["display_name"] == "历史关键词采集"
     assert view["source_missing"] is True
     assert view["progress"] == {"completed": 0, "total": 0, "percent": 0.0, "determinate": False}
-    assert view["allowed_actions"] == ["rerun"]
+    assert view["allowed_actions"] == ["delete_history"]
 
 
 def test_safe_error_maps_internal_type_to_user_recovery_message():
@@ -61,6 +61,12 @@ def test_safe_error_maps_internal_type_to_user_recovery_message():
         "recoverable": True,
         "recommended_action": "reconnect",
     }
+
+
+def test_cancelled_error_is_presented_as_user_action_not_execution_failure():
+    error = safe_error("cancelled", "cancelled by user")
+    assert error["user_message"] == "任务已由用户取消，已保存的数据不受影响。"
+    assert error["recommended_action"] == "rerun"
 
 
 def test_capabilities_and_dashboard_overview(monkeypatch, tmp_path):

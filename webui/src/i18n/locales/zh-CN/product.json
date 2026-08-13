@@ -157,7 +157,8 @@
       "view_results": "查看结果",
       "rerun": "再次运行",
       "view_error": "查看原因",
-      "view_details": "查看详情"
+      "view_details": "查看详情",
+      "delete_history": "删除记录"
     },
     "name": {
       "search": "关键词：{{value}}",
@@ -188,6 +189,15 @@
     "pageSummary": "第 {{page}} / {{pages}} 页 · 共 {{total}} 个任务",
     "cancelConfirm": "取消任务后，已经保存的数据不会回滚。确认取消？",
     "operationSubmitted": "任务操作已提交",
-    "operationRejected": "当前任务状态不允许执行此操作"
+    "operationRejected": "当前任务状态不允许执行此操作",
+    "rerunCreated": "已按原配置创建新任务",
+    "rerunRejected": "原账号或执行设备当前不可用，无法再次运行",
+    "deleteConfirm": "只删除这条任务记录，已采集的内容和媒体会保留。确认删除？",
+    "deleteTitle": "删除任务记录？",
+    "deleteCancel": "保留记录",
+    "deleteAction": "确认删除",
+    "deleting": "正在删除",
+    "deleteSuccess": "任务记录已删除，已采集结果保留",
+    "deleteRejected": "只能删除已结束的任务记录"
   }
 }

@@ -203,6 +203,21 @@ def test_remote_api_requires_trusted_proxy_and_isolates_users(monkeypatch, tmp_p
     }, headers=headers_a)
     assert rejected.status_code == 422
 
+    asyncio.run(store.update_remote_run(run_id, "cancelled"))
+    rerun = client.post(f"/api/flowlens/crawl-runs/{run_id}/rerun", headers=headers_a)
+    assert rerun.status_code == 200
+    assert rerun.json()["source_run_id"] == run_id
+    assert rerun.json()["run_id"] != run_id
+    assert client.post(f"/api/flowlens/crawl-runs/{run_id}/rerun", headers=headers_b).status_code == 404
+    assert client.delete(
+        f"/api/flowlens/crawl-runs/{run_id}", params={"confirm": "true"}, headers=headers_b,
+    ).status_code == 404
+    deleted_run = client.delete(
+        f"/api/flowlens/crawl-runs/{run_id}", params={"confirm": "true"}, headers=headers_a,
+    )
+    assert deleted_run.status_code == 200
+    assert deleted_run.json()["results_preserved"] is True
+
     async def seed_results():
         common = {
             "user_id":"user-a", "connection_id":session["connection_id"],

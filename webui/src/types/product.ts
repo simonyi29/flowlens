@@ -29,6 +29,7 @@ export interface ConnectionView {
 export type TaskAllowedAction =
   | 'pause' | 'resume' | 'cancel' | 'reconnect' | 'continue_after_login'
   | 'view_failures' | 'retry_failed' | 'view_results' | 'rerun' | 'view_error' | 'view_details'
+  | 'delete_history'
 
 export interface StageCount {
   label: string
