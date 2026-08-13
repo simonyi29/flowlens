@@ -361,14 +361,32 @@ async def create_crawl_run(request: RemoteCrawlRequest, user_id: str = Depends(c
 
 
 @router.get("/crawl-runs")
-async def crawl_runs(user_id: str = Depends(current_user)):
-    rows = await task_store.list_user_remote_runs(user_id)
+async def crawl_runs(
+    limit: int = 10,
+    offset: int = 0,
+    status: str | None = None,
+    user_id: str = Depends(current_user),
+):
+    valid_statuses = {
+        "queued", "running", "pausing", "paused", "waiting_for_login",
+        "waiting_for_space", "partial", "completed", "failed", "cancelled",
+    }
+    if status and status not in valid_statuses:
+        raise HTTPException(422, "Unsupported task status")
+    safe_limit = min(max(limit, 1), 100)
+    safe_offset = max(offset, 0)
+    rows = await task_store.list_user_remote_runs(user_id, safe_limit, safe_offset, status)
     connections = {item["connection_id"]: item for item in await task_store.list_user_connections(user_id)}
     return {"items":[present_run(
         item,
         account_label=connections.get(item["connection_id"], {}).get("masked_nickname") or "抖音账号",
         remote=True,
-    ) for item in rows]}
+    ) for item in rows],
+        "total": await task_store.count_user_remote_runs(user_id, status),
+        "status_counts": await task_store.user_remote_run_status_counts(user_id),
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
 
 
 @router.get("/crawl-runs/{run_id}")

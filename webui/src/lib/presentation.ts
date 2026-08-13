@@ -24,6 +24,7 @@ export const actionLabels: Record<TaskAllowedAction, string> = {
   pause: '暂停', resume: '继续', cancel: '取消', reconnect: '处理登录',
   continue_after_login: '登录后继续', view_failures: '查看失败项', retry_failed: '只重试失败项',
   view_results: '查看结果', rerun: '再次运行', view_error: '查看原因',
+  view_details: '查看详情',
 }
 
 export const stageLabels: Record<string, string> = {
@@ -31,10 +32,10 @@ export const stageLabels: Record<string, string> = {
   native_transcript: '原生字幕', media_download: '媒体下载', asr: '语音转写', finalize: '整理结果',
 }
 
-export function formatDate(value?: string | number | null) {
+export function formatDate(value?: string | number | null, locale = 'zh-CN') {
   if (!value) return '—'
   const date = typeof value === 'number' && value < 10_000_000_000 ? new Date(value * 1000) : new Date(value)
-  return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat('zh-CN', {
+  return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat(locale, {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(date)
 }

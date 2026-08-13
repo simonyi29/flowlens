@@ -5,11 +5,19 @@ from ..services.product_views import present_run, safe_error
 from ..services.task_store import task_store
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+TASK_STATUSES = {
+    "queued", "running", "pausing", "paused", "waiting_for_login",
+    "waiting_for_space", "partial", "completed", "failed", "cancelled",
+}
 
 
 @router.get("")
-async def list_tasks(limit: int = 100, offset: int = 0):
-    rows = await task_store.list_runs(min(max(limit, 1), 500), max(offset, 0))
+async def list_tasks(limit: int = 10, offset: int = 0, status: str | None = None):
+    if status and status not in TASK_STATUSES:
+        raise HTTPException(422, "Unsupported task status")
+    safe_limit = min(max(limit, 1), 100)
+    safe_offset = max(offset, 0)
+    rows = await task_store.list_runs(safe_limit, safe_offset, status)
     items = []
     for row in rows:
         items.append(present_run(
@@ -17,7 +25,13 @@ async def list_tasks(limit: int = 100, offset: int = 0):
             stages=await task_store.list_stages(row["run_id"]),
             summary=await task_store.run_summary(row["run_id"]),
         ))
-    return {"items": items}
+    return {
+        "items": items,
+        "total": await task_store.count_runs(status),
+        "status_counts": await task_store.run_status_counts(),
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
 
 
 @router.get("/{run_id}")

@@ -15,7 +15,7 @@ export function RemoteWorkspace() {
   const [connectionId,setConnectionId]=useState(''),[mode,setMode]=useState('search'),[source,setSource]=useState(''),[count,setCount]=useState(30)
   const [resultKind,setResultKind]=useState('aweme'),[results,setResults]=useState<Item[]>([])
   const connected=useMemo(()=>connections.filter(x=>x.status==='connected'),[connections])
-  const load=async()=>{const [w,c,r]=await Promise.all([remoteApi.workers(),remoteApi.connections(),remoteApi.runs()]);setWorkers(w.data.items);setConnections(c.data.items);setRuns(r.data.items);if(!connectionId&&c.data.items[0])setConnectionId(String(c.data.items[0].connection_id))}
+  const load=async()=>{const [w,c,r]=await Promise.all([remoteApi.workers(),remoteApi.connections(),remoteApi.runs()]);setWorkers(w.data.items);setConnections(c.data.items);setRuns(r.data.items as unknown as Item[]);if(!connectionId&&c.data.items[0])setConnectionId(String(c.data.items[0].connection_id))}
   useEffect(()=>{load().catch(()=>undefined);const timer=setInterval(()=>load().catch(()=>undefined),5000);return()=>clearInterval(timer)},[])
   useEffect(()=>{if(!session?.login_session_id)return;const timer=setInterval(async()=>{const response=await remoteApi.login(String(session.login_session_id));setSession(response.data);if(response.data.qr_available&&!qrUrl){const image=await remoteApi.qr(String(session.login_session_id));setQrUrl(URL.createObjectURL(image.data))}if(['logged_in','expired','cancelled','failed','captcha_required','risk_controlled'].includes(response.data.status)){void load()}},1000);return()=>clearInterval(timer)},[session?.login_session_id,qrUrl])
   useEffect(()=>()=>{if(qrUrl)URL.revokeObjectURL(qrUrl)},[qrUrl])

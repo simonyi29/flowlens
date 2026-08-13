@@ -28,7 +28,7 @@ export interface ConnectionView {
 
 export type TaskAllowedAction =
   | 'pause' | 'resume' | 'cancel' | 'reconnect' | 'continue_after_login'
-  | 'view_failures' | 'retry_failed' | 'view_results' | 'rerun' | 'view_error'
+  | 'view_failures' | 'retry_failed' | 'view_results' | 'rerun' | 'view_error' | 'view_details'
 
 export interface StageCount {
   label: string
@@ -49,8 +49,10 @@ export interface TaskSummary {
   stage_label: string
   display_name: string
   source_summary: string
+  source_missing: boolean
   account_label: string
-  progress: { completed: number; total: number; percent: number }
+  progress: { completed: number; total: number; percent: number; determinate: boolean }
+  failed_count: number
   stage_counts: Record<string, StageCount>
   allowed_actions: TaskAllowedAction[]
   created_at: string

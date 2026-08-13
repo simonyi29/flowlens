@@ -1,0 +1,132 @@
+{
+  "brandSubtitle": "Douyin data workspace",
+  "skipToContent": "Skip to main content",
+  "groups": {
+    "workspace": "Workspace",
+    "data": "Data",
+    "automation": "Automation",
+    "account": "Account"
+  },
+  "nav": {
+    "dashboard": "Overview",
+    "newCrawl": "New crawl",
+    "tasks": "Tasks",
+    "library": "Content",
+    "media": "Media",
+    "schedules": "Schedules",
+    "douyinAccount": "Douyin account",
+    "settings": "Settings",
+    "mobileTasks": "Tasks",
+    "mobileContent": "Content",
+    "mobileAccount": "Account"
+  },
+  "shell": {
+    "subtitle": "Collect, organize, and analyze public data locally",
+    "researchOnly": "Non-commercial research only",
+    "admin": "Admin",
+    "openNavigation": "Open navigation",
+    "closeNavigation": "Close navigation",
+    "closeOverlay": "Close navigation overlay",
+    "footer": "FlowLens 1.2 · Non-commercial learning and research",
+    "repository": "GitHub repository"
+  },
+  "theme": {
+    "label": "Interface theme",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System"
+  },
+  "language": {
+    "label": "Interface language",
+    "zh-CN": "中文",
+    "en-US": "EN"
+  },
+  "tasks": {
+    "eyebrow": "Workspace",
+    "title": "Task center",
+    "description": "Recognize tasks by source, follow each stage, and show only actions that are currently valid.",
+    "refresh": "Refresh",
+    "columns": {
+      "task": "Task",
+      "status": "Status",
+      "progress": "Progress",
+      "created": "Created",
+      "actions": "Actions"
+    },
+    "filters": {
+      "all": "All",
+      "running": "Running",
+      "queued": "Queued",
+      "waiting_for_login": "Login needed",
+      "partial": "Partial",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "status": {
+      "queued": "Queued",
+      "running": "Collecting",
+      "pausing": "Pausing",
+      "paused": "Paused",
+      "waiting_for_login": "Waiting for login",
+      "waiting_for_space": "Storage required",
+      "partial": "Partially completed",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "stage": {
+      "discover": "Discovering",
+      "detail": "Content details",
+      "creator": "Creator profile",
+      "comments": "Comments",
+      "native_transcript": "Native transcript",
+      "media_download": "Media download",
+      "asr": "Speech recognition",
+      "finalize": "Finalizing"
+    },
+    "action": {
+      "pause": "Pause",
+      "resume": "Resume",
+      "cancel": "Cancel",
+      "reconnect": "Reconnect",
+      "continue_after_login": "Continue after login",
+      "view_failures": "View failures",
+      "retry_failed": "Retry failed only",
+      "view_results": "View results",
+      "rerun": "Run again",
+      "view_error": "View error",
+      "view_details": "View details"
+    },
+    "name": {
+      "search": "Keyword: {{value}}",
+      "topic": "Topic: {{value}}",
+      "detail": "Video: {{value}}",
+      "creator": "Creator: {{value}}",
+      "legacy_search": "Historical keyword crawl",
+      "legacy_topic": "Historical topic crawl",
+      "legacy_detail": "Historical video crawl",
+      "legacy_creator": "Historical creator crawl"
+    },
+    "localAccount": "Local Douyin account",
+    "workProgress": "{{completed}}/{{total}} works",
+    "unknownProgress": "Work count was not recorded",
+    "unknownPercent": "—",
+    "unknownDuration": "Duration not recorded",
+    "lessThanSecond": "Less than 1 second",
+    "seconds": "{{count}} sec",
+    "minutes": "{{count}} min",
+    "hoursMinutes": "{{hours}} hr {{minutes}} min",
+    "loadingTitle": "Loading tasks",
+    "loadingDescription": "Reading the persistent task queue.",
+    "emptyTitle": "No matching tasks",
+    "emptyDescription": "Choose another filter or create a new crawl.",
+    "newCrawl": "New crawl",
+    "previous": "Previous",
+    "next": "Next",
+    "pageSummary": "Page {{page}} of {{pages}} · {{total}} tasks",
+    "cancelConfirm": "Cancelling will not remove data that has already been saved. Continue?",
+    "operationSubmitted": "Task action submitted",
+    "operationRejected": "This action is not available for the current task state"
+  }
+}

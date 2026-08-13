@@ -172,6 +172,12 @@ class TaskStore:
             self._ensure_columns(db, "login_session", {"user_id":"TEXT", "worker_id":"TEXT"})
             self._ensure_columns(db, "sync_outbox", {"worker_id":"TEXT"})
             db.execute("UPDATE crawl_run SET status='partial', finished_at=? WHERE status IN ('running','pausing')", (_now(),))
+            # Older direct CLI runs recorded an interrupted process as both
+            # ``partial`` and ``error_type=cancelled``.  That made the product
+            # UI offer a meaningless "retry failed items" action even though
+            # there were no failed items.  Preserve the run and its collected
+            # data, but repair the user-facing lifecycle state in place.
+            db.execute("UPDATE crawl_run SET status='cancelled' WHERE status='partial' AND error_type='cancelled'")
             db.execute("UPDATE browser_profile SET status='idle',pid=NULL,cdp_port=NULL,updated_at=? WHERE status='running'", (_now(),))
             db.execute("UPDATE login_session SET status='failed',error_type='worker_restarted',error_message='Worker restarted before login completed',updated_at=? WHERE status IN ('starting_browser','opening_login_page','generating_qr','qr_ready','qr_scanned','checking_login')", (_now(),))
             db.execute("INSERT OR IGNORE INTO task_schema_migrations(version,applied_at) VALUES('remote_worker_v1',?)", (_now(),))
@@ -244,8 +250,34 @@ class TaskStore:
     def _execute(self, sql, args=()):
         with self._connect() as db: db.execute(sql, args)
 
-    async def list_runs(self, limit=100, offset=0):
-        return await asyncio.to_thread(self._query, "SELECT * FROM crawl_run ORDER BY created_at DESC LIMIT ? OFFSET ?", (limit,offset))
+    async def list_runs(self, limit=100, offset=0, status: str | None = None):
+        if status:
+            return await asyncio.to_thread(
+                self._query,
+                "SELECT * FROM crawl_run WHERE status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (status, limit, offset),
+            )
+        return await asyncio.to_thread(
+            self._query,
+            "SELECT * FROM crawl_run ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+
+    async def count_runs(self, status: str | None = None) -> int:
+        sql = "SELECT COUNT(*) AS total FROM crawl_run"
+        args: tuple[Any, ...] = ()
+        if status:
+            sql += " WHERE status=?"
+            args = (status,)
+        rows = await asyncio.to_thread(self._query, sql, args)
+        return int(rows[0]["total"] if rows else 0)
+
+    async def run_status_counts(self) -> dict[str, int]:
+        rows = await asyncio.to_thread(
+            self._query,
+            "SELECT status,COUNT(*) AS total FROM crawl_run GROUP BY status",
+        )
+        return {str(row["status"]): int(row["total"]) for row in rows}
 
     async def get_run(self, run_id):
         rows = await asyncio.to_thread(self._query, "SELECT * FROM crawl_run WHERE run_id=?", (run_id,))
@@ -661,8 +693,41 @@ class TaskStore:
         rows = await asyncio.to_thread(self._query, "SELECT * FROM remote_crawl_run WHERE run_id=?", (run_id,))
         return rows[0] if rows else None
 
-    async def list_user_remote_runs(self, user_id: str):
-        return await asyncio.to_thread(self._query, "SELECT * FROM remote_crawl_run WHERE user_id=? ORDER BY created_at DESC", (user_id,))
+    async def list_user_remote_runs(
+        self,
+        user_id: str,
+        limit: int = 100,
+        offset: int = 0,
+        status: str | None = None,
+    ):
+        if status:
+            return await asyncio.to_thread(
+                self._query,
+                "SELECT * FROM remote_crawl_run WHERE user_id=? AND status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (user_id, status, limit, offset),
+            )
+        return await asyncio.to_thread(
+            self._query,
+            "SELECT * FROM remote_crawl_run WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (user_id, limit, offset),
+        )
+
+    async def count_user_remote_runs(self, user_id: str, status: str | None = None) -> int:
+        sql = "SELECT COUNT(*) AS total FROM remote_crawl_run WHERE user_id=?"
+        args: tuple[Any, ...] = (user_id,)
+        if status:
+            sql += " AND status=?"
+            args = (user_id, status)
+        rows = await asyncio.to_thread(self._query, sql, args)
+        return int(rows[0]["total"] if rows else 0)
+
+    async def user_remote_run_status_counts(self, user_id: str) -> dict[str, int]:
+        rows = await asyncio.to_thread(
+            self._query,
+            "SELECT status,COUNT(*) AS total FROM remote_crawl_run WHERE user_id=? GROUP BY status",
+            (user_id,),
+        )
+        return {str(row["status"]): int(row["total"]) for row in rows}
 
     async def update_remote_run(self, run_id: str, status: str, *, stage: str | None = None,
                                 error_type: str | None = None, error_message: str | None = None,

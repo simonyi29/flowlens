@@ -97,9 +97,23 @@ class DouYinCrawler(AbstractCrawler):
     async def start(self) -> None:
         crawl_run_id_var.set(os.getenv("FLOWLENS_RUN_ID") or uuid.uuid4().hex)
         await task_store.initialize()
+        run_config = {
+            "platform": "dy",
+            "crawler_type": config.CRAWLER_TYPE,
+            "source": "cli",
+            "max_notes_count": config.CRAWLER_MAX_NOTES_COUNT,
+        }
+        if config.CRAWLER_TYPE == "search":
+            run_config["keywords"] = config.KEYWORDS
+        elif config.CRAWLER_TYPE == "topic":
+            run_config["topics"] = config.DY_TOPICS
+        elif config.CRAWLER_TYPE == "detail":
+            run_config["specified_ids"] = config.DY_SPECIFIED_ID_LIST
+        elif config.CRAWLER_TYPE == "creator":
+            run_config["creator_ids"] = config.DY_CREATOR_ID_LIST
         await task_store.ensure_run(
             crawl_run_id_var.get(),
-            {"platform": "dy", "crawler_type": config.CRAWLER_TYPE, "source": "cli"},
+            run_config,
         )
         source_keyword_var.set("")
         source_topic_var.set("")
@@ -195,7 +209,7 @@ class DouYinCrawler(AbstractCrawler):
                 if self.transcript_service:
                     await self.transcript_service.cancel_and_close()
                 await task_store.update_run(
-                    crawl_run_id_var.get(), "partial", stage="finalize",
+                    crawl_run_id_var.get(), "cancelled", stage="finalize",
                     error_type="cancelled", error_message="crawler cancelled",
                 )
                 raise

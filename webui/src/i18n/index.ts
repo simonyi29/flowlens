@@ -9,6 +9,7 @@ import zhTerminal from './locales/zh-CN/terminal.json'
 import zhData from './locales/zh-CN/data.json'
 import zhEnv from './locales/zh-CN/env.json'
 import zhLicense from './locales/zh-CN/license.json'
+import zhProduct from './locales/zh-CN/product.json'
 
 // 英文翻译
 import enCommon from './locales/en-US/common.json'
@@ -17,6 +18,7 @@ import enTerminal from './locales/en-US/terminal.json'
 import enData from './locales/en-US/data.json'
 import enEnv from './locales/en-US/env.json'
 import enLicense from './locales/en-US/license.json'
+import enProduct from './locales/en-US/product.json'
 
 const resources = {
   'zh-CN': {
@@ -26,6 +28,7 @@ const resources = {
     data: zhData,
     env: zhEnv,
     license: zhLicense,
+    product: zhProduct,
   },
   'en-US': {
     common: enCommon,
@@ -34,6 +37,7 @@ const resources = {
     data: enData,
     env: enEnv,
     license: enLicense,
+    product: enProduct,
   },
 }
 
@@ -53,5 +57,12 @@ i18n
       lookupLocalStorage: 'flowlens_language',
     },
   })
+
+if (typeof document !== 'undefined') {
+  document.documentElement.lang = i18n.resolvedLanguage || i18n.language || 'zh-CN'
+  i18n.on('languageChanged', (language) => {
+    document.documentElement.lang = language
+  })
+}
 
 export default i18n

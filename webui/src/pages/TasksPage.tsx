@@ -1,45 +1,180 @@
-import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { AlertCircle, ChevronRight, Clock3, Pause, Play, RefreshCw, RotateCcw, Square, SquareStack } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { Link, useNavigate } from 'react-router-dom'
+import {
+  AlertCircle, ChevronLeft, ChevronRight, Clock3, Eye, Pause, Play,
+  RefreshCw, RotateCcw, Square, SquareStack,
+} from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { EmptyState, PageHeader, ProgressBar, StatusBadge, Surface } from '@/components/product/Primitives'
 import { remoteApi, taskApi } from '@/lib/api'
 import { useCapabilities } from '@/hooks/useProduct'
-import { actionLabels, formatDate, formatDuration } from '@/lib/presentation'
+import { formatDate } from '@/lib/presentation'
 import type { TaskAllowedAction, TaskSummary } from '@/types/product'
 
-const statusFilters = ['all','running','queued','waiting_for_login','partial','completed','failed']
+const PAGE_SIZE = 8
+const statusFilters = [
+  'all', 'running', 'queued', 'waiting_for_login', 'partial',
+  'completed', 'failed', 'cancelled',
+] as const
+type TaskFilter = typeof statusFilters[number]
 
 export default function TasksPage() {
-  const capabilities = useCapabilities(); const remote = capabilities.data?.features.remote_worker
-  const [items, setItems] = useState<TaskSummary[]>([]), [filter, setFilter] = useState('all'), [loading, setLoading] = useState(true)
-  const load = async () => { setLoading(true); try { const response = remote ? await remoteApi.runs() : await taskApi.list(); setItems(response.data.items) } finally { setLoading(false) } }
-  useEffect(() => { if (capabilities.data) void load(); const timer = setInterval(() => { if (capabilities.data) void load() }, 5000); return () => clearInterval(timer) }, [remote, capabilities.data])
-  const filtered = filter === 'all' ? items : items.filter(item => item.status === filter)
-  const control = async (run: TaskSummary, action: TaskAllowedAction) => {
-    if (action === 'rerun') { window.location.hash = `#/crawl/new?mode=${run.crawler_type || 'search'}`; return }
-    if (action === 'view_results') { window.location.hash = '#/library'; return }
-    if (action === 'view_failures' || action === 'view_error') { window.location.hash = `#/tasks/${run.run_id}`; return }
-    if (action === 'reconnect') { window.location.hash = '#/connect'; return }
-    if (action === 'cancel' && !confirm('取消任务后，已经保存的数据不会回滚。确认取消？')) return
+  const { t, i18n } = useTranslation('product')
+  const navigate = useNavigate()
+  const capabilities = useCapabilities()
+  const remote = Boolean(capabilities.data?.features.remote_worker)
+  const [items, setItems] = useState<TaskSummary[]>([])
+  const [filter, setFilter] = useState<TaskFilter>('all')
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({})
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async (quiet = false) => {
+    if (!capabilities.data) return
+    if (!quiet) setLoading(true)
     try {
-      if (remote) await remoteApi.control(run.run_id, action === 'retry_failed' ? 'retry-failed' : action as 'pause'|'resume'|'cancel')
-      else if (action === 'pause') await taskApi.pause(run.run_id)
+      const params = {
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        status: filter === 'all' ? undefined : filter,
+      }
+      const response = remote ? await remoteApi.runs(params) : await taskApi.list(params)
+      setItems(response.data.items)
+      setTotal(response.data.total)
+      setStatusCounts(response.data.status_counts)
+    } catch {
+      if (!quiet) toast.error(t('tasks.operationRejected'))
+    } finally {
+      if (!quiet) setLoading(false)
+    }
+  }, [capabilities.data, filter, page, remote, t])
+
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(() => void load(true), 5000)
+    return () => window.clearInterval(timer)
+  }, [load])
+
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  useEffect(() => {
+    if (page > pages) setPage(pages)
+  }, [page, pages])
+
+  const filterCount = (status: TaskFilter) => status === 'all'
+    ? Object.values(statusCounts).reduce((sum, count) => sum + count, 0)
+    : statusCounts[status] || 0
+
+  const control = async (run: TaskSummary, action: TaskAllowedAction) => {
+    if (action === 'rerun') { navigate(`/crawl/new?mode=${run.crawler_type || 'search'}`); return }
+    if (action === 'view_results') { navigate('/library'); return }
+    if (['view_failures', 'view_error', 'view_details'].includes(action)) { navigate(`/tasks/${run.run_id}`); return }
+    if (action === 'reconnect') { navigate('/connect'); return }
+    if (action === 'cancel' && !window.confirm(t('tasks.cancelConfirm'))) return
+    try {
+      if (remote) {
+        await remoteApi.control(run.run_id, action === 'retry_failed' ? 'retry-failed' : action as 'pause'|'resume'|'cancel')
+      } else if (action === 'pause') await taskApi.pause(run.run_id)
       else if (action === 'resume') await taskApi.resume(run.run_id)
       else if (action === 'continue_after_login') await taskApi.continueAfterLogin(run.run_id)
       else if (action === 'cancel') await taskApi.cancel(run.run_id)
       else if (action === 'retry_failed') await taskApi.retry(run.run_id)
-      toast.success('任务操作已提交'); await load()
-    } catch { toast.error('当前任务状态不允许执行此操作') }
+      toast.success(t('tasks.operationSubmitted'))
+      await load(true)
+    } catch {
+      toast.error(t('tasks.operationRejected'))
+    }
   }
-  return <div><PageHeader eyebrow="工作台" title="任务中心" description="按采集来源识别任务，查看每个阶段的进度，并只显示当前可执行的操作。" actions={<Button variant="outline" onClick={load}><RefreshCw className={loading ? 'animate-spin' : ''}/>刷新</Button>}/>
-    <div className="mb-4 flex gap-2 overflow-x-auto pb-1">{statusFilters.map(status => <button key={status} onClick={() => setFilter(status)} className={`min-h-9 whitespace-nowrap rounded-full px-3 text-xs font-medium ring-1 ring-inset ${filter === status ? 'bg-slate-950 text-white ring-slate-950' : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50'}`}>{status === 'all' ? `全部 ${items.length}` : <>{({running:'运行中',queued:'排队中',waiting_for_login:'等待登录',partial:'部分完成',completed:'已完成',failed:'失败'} as Record<string,string>)[status]} {items.filter(item => item.status === status).length}</>}</button>)}</div>
-    <Surface className="overflow-hidden">{filtered.length ? <><div className="hidden grid-cols-[minmax(240px,1.6fr)_130px_180px_145px_minmax(210px,auto)] gap-4 border-b border-slate-200 bg-slate-50 px-5 py-3 text-xs font-medium text-slate-500 lg:grid"><span>任务</span><span>状态</span><span>进度</span><span>创建时间</span><span className="text-right">操作</span></div><div>{filtered.map(run => <TaskRow key={run.run_id} run={run} onAction={control}/>)}</div></> : <EmptyState icon={<SquareStack/>} title={loading ? '正在加载任务' : '没有符合条件的任务'} description={loading ? '正在读取持久任务队列。' : '切换筛选条件，或者创建一个新的采集任务。'} action={!loading ? <Button asChild><Link to="/crawl/new">新建采集</Link></Button> : undefined}/>}</Surface>
+
+  return <div>
+    <PageHeader
+      eyebrow={t('tasks.eyebrow')}
+      title={t('tasks.title')}
+      description={t('tasks.description')}
+      actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'animate-spin' : ''}/>{t('tasks.refresh')}</Button>}
+    />
+    <div className="mb-4 flex gap-2 overflow-x-auto pb-1" role="tablist" aria-label={t('tasks.title')}>
+      {statusFilters.map(status => <button
+        key={status}
+        type="button"
+        role="tab"
+        aria-selected={filter === status}
+        onClick={() => { setFilter(status); setPage(1) }}
+        className={`min-h-9 whitespace-nowrap rounded-full px-3 text-xs font-medium ring-1 ring-inset ${filter === status ? 'bg-slate-950 text-white ring-slate-950' : 'bg-white text-slate-600 ring-slate-200 hover:bg-slate-50'}`}
+      >{t(`tasks.filters.${status}`)} {filterCount(status)}</button>)}
+    </div>
+    <Surface className="overflow-hidden">
+      {items.length ? <>
+        <div className="hidden grid-cols-[minmax(240px,1.55fr)_120px_190px_135px_minmax(170px,auto)] gap-4 border-b border-slate-200 bg-slate-50 px-5 py-2.5 text-xs font-medium text-slate-500 xl:grid">
+          <span>{t('tasks.columns.task')}</span><span>{t('tasks.columns.status')}</span><span>{t('tasks.columns.progress')}</span><span>{t('tasks.columns.created')}</span><span className="text-right">{t('tasks.columns.actions')}</span>
+        </div>
+        <div>{items.map(run => <TaskRow key={run.run_id} run={run} locale={i18n.resolvedLanguage || i18n.language} onAction={control}/>)}</div>
+        <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50/70 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-center text-xs text-slate-500 sm:text-left">{t('tasks.pageSummary', { page, pages, total })}</p>
+          <div className="flex justify-center gap-2">
+            <Button size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => setPage(value => value - 1)}><ChevronLeft/>{t('tasks.previous')}</Button>
+            <Button size="sm" variant="outline" disabled={page >= pages || loading} onClick={() => setPage(value => value + 1)}>{t('tasks.next')}<ChevronRight/></Button>
+          </div>
+        </div>
+      </> : <EmptyState
+        icon={<SquareStack/>}
+        title={loading ? t('tasks.loadingTitle') : t('tasks.emptyTitle')}
+        description={loading ? t('tasks.loadingDescription') : t('tasks.emptyDescription')}
+        action={!loading ? <Button asChild><Link to="/crawl/new">{t('tasks.newCrawl')}</Link></Button> : undefined}
+      />}
+    </Surface>
   </div>
 }
 
-function TaskRow({ run, onAction }: { run: TaskSummary; onAction: (run:TaskSummary, action:TaskAllowedAction)=>void }) {
-  const visible = run.allowed_actions.filter(action => !['continue_after_login'].includes(action)).slice(0, 3)
-  return <article className="border-b border-slate-100 p-4 last:border-0 lg:grid lg:grid-cols-[minmax(240px,1.6fr)_130px_180px_145px_minmax(210px,auto)] lg:items-center lg:gap-4 lg:px-5"><div className="min-w-0"><Link to={`/tasks/${run.run_id}`} className="group flex items-start justify-between gap-3"><div className="min-w-0"><h2 className="truncate text-sm font-semibold text-slate-950 group-hover:text-teal-800">{run.display_name}</h2><p className="mt-1 truncate text-xs text-slate-500">{run.account_label} · {run.stage_label}</p></div><ChevronRight className="mt-1 h-4 w-4 shrink-0 text-slate-300 lg:hidden"/></Link></div><div className="mt-3 lg:mt-0"><StatusBadge status={run.status} label={run.status_label}/></div><div className="mt-4 lg:mt-0"><div className="flex items-center justify-between text-xs text-slate-500"><span>{run.progress.completed}/{run.progress.total || '—'} 个作品</span><span>{run.progress.percent}%</span></div><div className="mt-2"><ProgressBar value={run.progress.percent}/></div></div><div className="mt-3 text-xs text-slate-500 lg:mt-0"><p>{formatDate(run.created_at)}</p><p className="mt-1 flex items-center gap-1"><Clock3 className="h-3.5 w-3.5"/>{formatDuration(run.elapsed_seconds)}</p></div><div className="mt-4 flex flex-wrap gap-2 lg:mt-0 lg:justify-end">{visible.map(action => <Button key={action} size="sm" variant={action === 'cancel' ? 'ghost' : action === 'retry_failed' ? 'outline' : 'secondary'} onClick={() => onAction(run, action)}>{action === 'pause' ? <Pause/> : action === 'resume' ? <Play/> : action === 'cancel' ? <Square/> : action === 'retry_failed' || action === 'rerun' ? <RotateCcw/> : action === 'view_error' ? <AlertCircle/> : null}{actionLabels[action]}</Button>)}</div></article>
+function TaskRow({ run, locale, onAction }: {
+  run: TaskSummary
+  locale: string
+  onAction: (run: TaskSummary, action: TaskAllowedAction) => void
+}) {
+  const { t } = useTranslation('product')
+  const visible = run.allowed_actions.filter(action => action !== 'continue_after_login').slice(0, 2)
+  const crawlerType = ['search', 'topic', 'detail', 'creator'].includes(run.crawler_type || '') ? run.crawler_type! : 'search'
+  const displayName = run.source_missing
+    ? t(`tasks.name.legacy_${crawlerType}`)
+    : t(`tasks.name.${crawlerType}`, { value: run.source_summary })
+  const accountLabel = run.connection_id ? run.account_label : t('tasks.localAccount')
+  const progressLabel = run.progress.determinate
+    ? t('tasks.workProgress', { completed: run.progress.completed, total: run.progress.total })
+    : t('tasks.unknownProgress')
+  const duration = formatTaskDuration(run.elapsed_seconds, t)
+  const date = formatDate(run.created_at, locale)
+
+  return <article className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-3 border-b border-slate-100 p-4 last:border-0 sm:grid-cols-[minmax(220px,1fr)_110px_minmax(150px,auto)] xl:grid-cols-[minmax(240px,1.55fr)_120px_190px_135px_minmax(170px,auto)] xl:items-center xl:px-5 xl:py-3.5">
+    <div className="min-w-0 xl:col-start-1 xl:row-start-1">
+      <Link to={`/tasks/${run.run_id}`} className="group block min-w-0">
+        <h2 className="truncate text-sm font-semibold text-slate-950 group-hover:text-teal-800">{displayName}</h2>
+        <p className="mt-1 truncate text-xs text-slate-500">{accountLabel} · {t(`tasks.stage.${run.stage || 'discover'}`)}</p>
+      </Link>
+    </div>
+    <div className="justify-self-end sm:justify-self-start xl:col-start-2 xl:row-start-1"><StatusBadge status={run.status} label={t(`tasks.status.${run.status}`)}/></div>
+    <div className="col-span-2 sm:col-span-1 sm:col-start-1 sm:row-start-2 xl:col-start-3 xl:row-start-1">
+      <div className="flex items-center justify-between gap-3 text-xs text-slate-500"><span className="truncate">{progressLabel}</span><span className="shrink-0 tabular-nums">{run.progress.determinate ? `${run.progress.percent}%` : t('tasks.unknownPercent')}</span></div>
+      <div className="mt-2">{run.progress.determinate ? <ProgressBar value={run.progress.percent} label={progressLabel}/> : <div className="h-2 rounded-full bg-slate-100" aria-label={progressLabel}/>}</div>
+    </div>
+    <div className="col-span-2 text-xs text-slate-500 sm:col-span-1 sm:col-start-2 sm:row-start-2 xl:col-start-4 xl:row-start-1">
+      <p>{date}</p><p className="mt-1 flex items-center gap-1"><Clock3 className="h-3.5 w-3.5"/><span>{duration}</span></p>
+    </div>
+    <div className="col-span-2 flex flex-wrap gap-2 sm:col-span-1 sm:col-start-3 sm:row-span-2 sm:row-start-1 sm:items-center sm:justify-end xl:col-start-5 xl:row-start-1">
+      {visible.map(action => <Button key={action} size="sm" variant={action === 'cancel' ? 'ghost' : action === 'retry_failed' ? 'outline' : 'secondary'} onClick={() => onAction(run, action)}>
+        {action === 'pause' ? <Pause/> : action === 'resume' ? <Play/> : action === 'cancel' ? <Square/> : action === 'retry_failed' || action === 'rerun' ? <RotateCcw/> : action === 'view_error' ? <AlertCircle/> : action === 'view_details' || action === 'view_failures' || action === 'view_results' ? <Eye/> : null}
+        {t(`tasks.action.${action}`)}
+      </Button>)}
+    </div>
+  </article>
+}
+
+function formatTaskDuration(seconds: number | null | undefined, t: ReturnType<typeof useTranslation<'product'>>['t']) {
+  if (seconds == null) return t('tasks.unknownDuration')
+  if (seconds < 1) return t('tasks.lessThanSecond')
+  if (seconds < 60) return t('tasks.seconds', { count: Math.round(seconds) })
+  const minutes = Math.floor(seconds / 60)
+  if (seconds < 3600) return t('tasks.minutes', { count: minutes })
+  return t('tasks.hoursMinutes', { hours: Math.floor(minutes / 60), minutes: minutes % 60 })
 }

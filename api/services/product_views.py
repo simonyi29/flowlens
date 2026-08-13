@@ -42,7 +42,10 @@ def parse_config(raw: Any) -> dict[str, Any]:
 
 
 def _first_source(config: dict[str, Any], key: str) -> str:
-    value = str(config.get(key) or "").strip()
+    raw = config.get(key)
+    if isinstance(raw, (list, tuple)):
+        return next((str(item).strip() for item in raw if str(item).strip()), "")
+    value = str(raw or "").strip()
     if not value:
         return ""
     return next((item.strip() for item in value.replace("\n", ",").split(",") if item.strip()), "")
@@ -51,21 +54,21 @@ def _first_source(config: dict[str, Any], key: str) -> str:
 def source_view(crawler_type: str, config: dict[str, Any]) -> tuple[str, str]:
     if crawler_type == "topic":
         source = _first_source(config, "topics")
-        return f"话题：{source or '未命名话题'}", source
+        return (f"话题：{source}" if source else "历史话题采集"), source
     if crawler_type == "detail":
         source = _first_source(config, "specified_ids")
         compact = source if len(source) <= 18 else f"{source[:14]}…"
-        return f"视频详情：{compact or '指定作品'}", source
+        return (f"视频详情：{compact}" if compact else "历史视频采集"), source
     if crawler_type == "creator":
         source = _first_source(config, "creator_ids")
         compact = source if len(source) <= 18 else f"{source[:14]}…"
         prefix = "账号增量" if config.get("incremental") else "指定账号"
-        return f"{prefix}：{compact or '未命名账号'}", source
+        return (f"{prefix}：{compact}" if compact else "历史账号采集"), source
     source = _first_source(config, "keywords")
-    return f"关键词：{source or '未命名任务'}", source
+    return (f"关键词：{source}" if source else "历史关键词采集"), source
 
 
-def allowed_actions(status: str) -> list[str]:
+def allowed_actions(status: str, failed_count: int = 0) -> list[str]:
     return {
         "queued": ["cancel"],
         "running": ["pause", "cancel"],
@@ -73,7 +76,7 @@ def allowed_actions(status: str) -> list[str]:
         "paused": ["resume", "cancel"],
         "waiting_for_login": ["reconnect", "continue_after_login", "cancel"],
         "waiting_for_space": ["resume", "cancel"],
-        "partial": ["view_failures", "retry_failed"],
+        "partial": ["view_failures", "retry_failed"] if failed_count else ["view_details", "rerun"],
         "completed": ["view_results", "rerun"],
         "failed": ["view_error", "retry_failed"],
         "cancelled": ["rerun"],
@@ -111,19 +114,29 @@ def present_run(
     discover = stage_counts.get("discover", {})
     completed = int(detail.get("completed") or discover.get("completed") or 0)
     total = int(config.get("max_notes_count") or detail.get("total") or discover.get("total") or 0)
-    percent = round(min(completed / total * 100, 100), 1) if total else (100.0 if run.get("status") == "completed" else 0.0)
+    percent = round(min(completed / total * 100, 100), 1) if total else 0.0
     status = str(run.get("status") or "queued")
+    failed_count = sum(int(item.get("failed") or 0) for item in stage_counts.values())
+    if status in {"partial", "failed"} and run.get("error_type") and not failed_count:
+        failed_count = 1
     summary = summary or {}
     return {
         **run,
         "display_name": display_name,
         "source_summary": source_summary,
+        "source_missing": not bool(source_summary),
         "account_label": account_label or ("已连接抖音账号" if remote else "本机抖音账号"),
         "status_label": STATUS_LABELS.get(status, status),
         "stage_label": STAGE_LABELS.get(str(run.get("stage") or "discover"), str(run.get("stage") or "discover")),
-        "progress": {"completed": completed, "total": total, "percent": percent},
+        "progress": {
+            "completed": completed,
+            "total": total,
+            "percent": percent,
+            "determinate": total > 0,
+        },
         "stage_counts": stage_counts,
-        "allowed_actions": allowed_actions(status),
+        "failed_count": failed_count,
+        "allowed_actions": allowed_actions(status, failed_count),
         "estimated_remaining_seconds": summary.get("estimated_remaining_seconds"),
         "elapsed_seconds": summary.get("elapsed_seconds"),
         "downloaded_bytes": summary.get("downloaded_bytes", 0),

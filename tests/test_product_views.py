@@ -24,7 +24,7 @@ def test_task_view_has_readable_name_progress_and_state_actions():
     }])
     assert view["display_name"] == "关键词：新能源汽车"
     assert view["source_summary"] == "新能源汽车"
-    assert view["progress"] == {"completed": 12, "total": 30, "percent": 40.0}
+    assert view["progress"] == {"completed": 12, "total": 30, "percent": 40.0, "determinate": True}
     assert view["status_label"] == "正在采集"
     assert view["allowed_actions"] == ["pause", "cancel"]
 
@@ -32,8 +32,24 @@ def test_task_view_has_readable_name_progress_and_state_actions():
 def test_allowed_actions_are_strictly_state_specific():
     assert allowed_actions("completed") == ["view_results", "rerun"]
     assert "pause" not in allowed_actions("completed")
-    assert allowed_actions("partial") == ["view_failures", "retry_failed"]
+    assert allowed_actions("partial", failed_count=1) == ["view_failures", "retry_failed"]
+    assert allowed_actions("partial") == ["view_details", "rerun"]
     assert allowed_actions("waiting_for_login") == ["reconnect", "continue_after_login", "cancel"]
+
+
+def test_legacy_run_has_honest_name_and_indeterminate_progress():
+    view = present_run({
+        "run_id": "legacy-run",
+        "platform": "dy",
+        "crawler_type": "search",
+        "status": "cancelled",
+        "stage": "finalize",
+        "config_json": '{"source":"cli"}',
+    })
+    assert view["display_name"] == "历史关键词采集"
+    assert view["source_missing"] is True
+    assert view["progress"] == {"completed": 0, "total": 0, "percent": 0.0, "determinate": False}
+    assert view["allowed_actions"] == ["rerun"]
 
 
 def test_safe_error_maps_internal_type_to_user_recovery_message():

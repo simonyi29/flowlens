@@ -117,7 +117,7 @@ export const envApi = {
 }
 
 export const taskApi = {
-  list: () => api.get<{items: import('@/types/product').TaskSummary[]}>('/tasks'),
+  list: (params: {limit?:number;offset?:number;status?:string} = {}) => api.get<{items: import('@/types/product').TaskSummary[];total:number;status_counts:Record<string,number>;limit:number;offset:number}>('/tasks',{params}),
   detail: (id:string) => api.get<import('@/types/product').TaskSummary & Record<string, unknown>>(`/tasks/${id}`),
   items: (id:string) => api.get(`/tasks/${id}/items`),
   logs: (id:string) => api.get(`/tasks/${id}/logs`),
@@ -182,7 +182,7 @@ export const remoteApi = {
   cancelLogin: (id:string) => api.post(`/flowlens/douyin/login-sessions/${id}/cancel`,{}, {headers:remoteHeaders()}),
   disconnect: (id:string) => api.delete(`/flowlens/douyin/connections/${id}`,{headers:remoteHeaders(),params:{confirm:true}}),
   reconnect: (id:string) => api.post(`/flowlens/douyin/connections/${id}/login-session`,{}, {headers:remoteHeaders()}),
-  runs: () => api.get('/flowlens/crawl-runs',{headers:remoteHeaders()}),
+  runs: (params: {limit?:number;offset?:number;status?:string} = {}) => api.get<{items: import('@/types/product').TaskSummary[];total:number;status_counts:Record<string,number>;limit:number;offset:number}>('/flowlens/crawl-runs',{headers:remoteHeaders(),params}),
   run: (id:string) => api.get(`/flowlens/crawl-runs/${id}`,{headers:remoteHeaders()}),
   runItems: (id:string) => api.get(`/flowlens/crawl-runs/${id}/items`,{headers:remoteHeaders()}),
   runLogs: (id:string) => api.get(`/flowlens/crawl-runs/${id}/logs`,{headers:remoteHeaders()}),
