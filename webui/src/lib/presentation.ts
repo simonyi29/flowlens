@@ -18,6 +18,8 @@ export const statusPresentation: Record<string, { label: string; tone: string; d
   disconnected: { label: '已断开', tone: 'neutral', description: '账号连接已断开' },
   online: { label: '在线', tone: 'success', description: '执行设备在线' },
   offline: { label: '离线', tone: 'danger', description: '执行设备暂时不可用' },
+  downloading: { label: '下载中', tone: 'info', description: '媒体正在下载' },
+  deleted: { label: '已删除', tone: 'neutral', description: '文件已删除，数据库记录仍保留' },
 }
 
 export const actionLabels: Record<TaskAllowedAction, string> = {

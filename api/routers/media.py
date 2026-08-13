@@ -7,6 +7,9 @@ from ..services.task_store import task_store
 
 router = APIRouter(prefix="/media", tags=["media"])
 MEDIA_ROOT = (Path(__file__).resolve().parents[2] / "data" / "douyin" / "media").resolve()
+MEDIA_KINDS = {"video", "image", "cover", "music"}
+MEDIA_STATUSES = {"active", "completed", "downloading", "partial", "waiting_for_space", "failed", "deleted"}
+MEDIA_SORTS = {"newest", "oldest", "largest"}
 
 
 def _safe_asset_path(item: dict) -> Path:
@@ -20,8 +23,40 @@ def _safe_asset_path(item: dict) -> Path:
 
 
 @router.get("")
-async def list_media(limit: int = 100, offset: int = 0, aweme_id: str | None = None):
-    return {"items": await task_store.list_media(min(max(limit, 1), 500), max(offset, 0), aweme_id)}
+async def list_media(
+    limit: int = 12,
+    offset: int = 0,
+    aweme_id: str | None = None,
+    q: str | None = None,
+    kind: str | None = None,
+    status: str = "active",
+    sort: str = "newest",
+):
+    if kind and kind not in MEDIA_KINDS:
+        raise HTTPException(422, "Unsupported media kind")
+    if status not in MEDIA_STATUSES:
+        raise HTTPException(422, "Unsupported media status")
+    if sort not in MEDIA_SORTS:
+        raise HTTPException(422, "Unsupported media sort")
+    safe_limit = min(max(limit, 1), 100)
+    safe_offset = max(offset, 0)
+    query = (q or "").strip()[:200] or None
+    items = await task_store.list_media(
+        safe_limit,
+        safe_offset,
+        aweme_id,
+        query=query,
+        kind=kind,
+        status=status,
+        sort=sort,
+    )
+    summary = await task_store.media_catalog_summary(
+        aweme_id=aweme_id,
+        query=query,
+        kind=kind,
+        status=status,
+    )
+    return {"items": items, **summary, "limit": safe_limit, "offset": safe_offset}
 
 
 @router.get("/{asset_id}")
@@ -64,7 +99,8 @@ async def delete_media(asset_id: str, confirm: bool = False):
     item = await task_store.get_media(asset_id)
     if not item: raise HTTPException(404, "Media asset not found")
     path = _safe_asset_path(item)
-    if path.is_file(): path.unlink()
+    deleted_file = path.is_file()
+    if deleted_file: path.unlink()
     item.update({"asset_id": asset_id, "status": "deleted", "path": None, "size_bytes": 0})
     await task_store.upsert_media(item)
-    return {"status": "deleted", "asset_id": asset_id}
+    return {"status": "deleted", "asset_id": asset_id, "deleted_file": deleted_file}

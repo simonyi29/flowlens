@@ -456,12 +456,15 @@ async def remote_results(entity_type: str, limit: int = 50, offset: int = 0,
     allowed = {"aweme", "creator", "topic", "comment", "transcript", "aweme_metric", "creator_metric", "media", "log"}
     if entity_type not in allowed:
         raise HTTPException(422, "unsupported result entity type")
-    rows = await task_store.list_user_remote_results(
-        user_id, entity_type, min(max(limit, 1), 500), max(offset, 0)
+    safe_limit = min(max(limit, 1), 500)
+    safe_offset = max(offset, 0)
+    rows, total = await asyncio.gather(
+        task_store.list_user_remote_results(user_id, entity_type, safe_limit, safe_offset),
+        task_store.count_user_remote_results(user_id, entity_type),
     )
     for row in rows:
         row["payload"] = json.loads(row.pop("payload_json"))
-    return {"items":rows}
+    return {"items": rows, "total": total, "limit": safe_limit, "offset": safe_offset}
 
 
 @router.get("/results/aweme/{aweme_id}/detail")

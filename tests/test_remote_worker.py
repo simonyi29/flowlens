@@ -223,6 +223,15 @@ def test_remote_api_requires_trusted_proxy_and_isolates_users(monkeypatch, tmp_p
             })
 
     asyncio.run(seed_results())
+    media_results = client.get(
+        "/api/flowlens/results/media",
+        params={"limit": 1, "offset": 0},
+        headers=headers_a,
+    )
+    assert media_results.status_code == 200
+    assert media_results.json()["total"] == 1
+    assert media_results.json()["limit"] == 1
+    assert media_results.json()["offset"] == 0
     detail = client.get("/api/flowlens/results/aweme/aweme-1/detail", headers=headers_a)
     assert detail.status_code == 200
     assert detail.json()["comments"][0]["replies"][0]["content"] == "回复"

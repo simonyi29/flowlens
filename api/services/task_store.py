@@ -178,6 +178,25 @@ class TaskStore:
             # there were no failed items.  Preserve the run and its collected
             # data, but repair the user-facing lifecycle state in place.
             db.execute("UPDATE crawl_run SET status='cancelled' WHERE status='partial' AND error_type='cancelled'")
+            # A few older downloader versions could create two asset rows for
+            # the same physical file. Keep the best metadata row and retire
+            # only the duplicate database records; the shared file remains.
+            db.execute("""
+                WITH ranked AS (
+                  SELECT asset_id,
+                         ROW_NUMBER() OVER (
+                           PARTITION BY path
+                           ORDER BY CASE WHEN mime_type LIKE 'video/%' THEN 0 ELSE 1 END,
+                                    updated_at DESC,
+                                    asset_id
+                         ) AS position
+                  FROM media_asset
+                  WHERE path IS NOT NULL AND status <> 'deleted'
+                )
+                UPDATE media_asset
+                SET status='deleted',path=NULL,size_bytes=0,updated_at=?
+                WHERE asset_id IN (SELECT asset_id FROM ranked WHERE position > 1)
+            """, (_now(),))
             db.execute("UPDATE browser_profile SET status='idle',pid=NULL,cdp_port=NULL,updated_at=? WHERE status='running'", (_now(),))
             db.execute("UPDATE login_session SET status='failed',error_type='worker_restarted',error_message='Worker restarted before login completed',updated_at=? WHERE status IN ('starting_browser','opening_login_page','generating_qr','qr_ready','qr_scanned','checking_login')", (_now(),))
             db.execute("INSERT OR IGNORE INTO task_schema_migrations(version,applied_at) VALUES('remote_worker_v1',?)", (_now(),))
@@ -409,10 +428,92 @@ class TaskStore:
             })
         return asset_id
 
-    async def list_media(self, limit=100, offset=0, aweme_id: str | None = None):
+    @staticmethod
+    def _media_filters(
+        *,
+        aweme_id: str | None = None,
+        query: str | None = None,
+        kind: str | None = None,
+        status: str | None = "active",
+    ) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        values: list[Any] = []
         if aweme_id:
-            return await asyncio.to_thread(self._query, "SELECT * FROM media_asset WHERE aweme_id=? ORDER BY updated_at DESC LIMIT ? OFFSET ?", (aweme_id,limit,offset))
-        return await asyncio.to_thread(self._query, "SELECT * FROM media_asset ORDER BY updated_at DESC LIMIT ? OFFSET ?", (limit,offset))
+            clauses.append("aweme_id=?")
+            values.append(aweme_id)
+        if query:
+            clauses.append("(aweme_id LIKE ? OR creator_hash LIKE ? OR quality LIKE ? OR mime_type LIKE ?)")
+            pattern = f"%{query.strip()}%"
+            values.extend([pattern, pattern, pattern, pattern])
+        if kind:
+            clauses.append("kind=?")
+            values.append(kind)
+        if status == "active":
+            clauses.append("status<>'deleted'")
+        elif status:
+            clauses.append("status=?")
+            values.append(status)
+        return (" WHERE " + " AND ".join(clauses) if clauses else ""), values
+
+    async def list_media(
+        self,
+        limit: int = 24,
+        offset: int = 0,
+        aweme_id: str | None = None,
+        *,
+        query: str | None = None,
+        kind: str | None = None,
+        status: str | None = "active",
+        sort: str = "newest",
+    ):
+        where, values = self._media_filters(
+            aweme_id=aweme_id, query=query, kind=kind, status=status,
+        )
+        order_by = {
+            "newest": "updated_at DESC,asset_id",
+            "oldest": "updated_at ASC,asset_id",
+            "largest": "size_bytes DESC,updated_at DESC",
+        }.get(sort, "updated_at DESC,asset_id")
+        return await asyncio.to_thread(
+            self._query,
+            f"SELECT * FROM media_asset{where} ORDER BY {order_by} LIMIT ? OFFSET ?",
+            (*values, limit, offset),
+        )
+
+    async def media_catalog_summary(
+        self,
+        *,
+        aweme_id: str | None = None,
+        query: str | None = None,
+        kind: str | None = None,
+        status: str | None = "active",
+    ) -> dict[str, Any]:
+        where, values = self._media_filters(
+            aweme_id=aweme_id, query=query, kind=kind, status=status,
+        )
+        total_rows, status_rows, kind_rows = await asyncio.gather(
+            asyncio.to_thread(
+                self._query,
+                f"SELECT COUNT(*) AS total,COALESCE(SUM(size_bytes),0) AS bytes FROM media_asset{where}",
+                tuple(values),
+            ),
+            asyncio.to_thread(
+                self._query,
+                "SELECT status,COUNT(*) AS total FROM media_asset GROUP BY status",
+            ),
+            asyncio.to_thread(
+                self._query,
+                "SELECT kind,COUNT(*) AS total FROM media_asset WHERE status<>'deleted' GROUP BY kind",
+            ),
+        )
+        current = total_rows[0] if total_rows else {"total": 0, "bytes": 0}
+        return {
+            "total": int(current["total"] or 0),
+            "filtered_bytes": int(current["bytes"] or 0),
+            "active_total": sum(int(row["total"]) for row in status_rows if row["status"] != "deleted"),
+            "status_counts": {str(row["status"]): int(row["total"]) for row in status_rows},
+            "kind_counts": {str(row["kind"]): int(row["total"]) for row in kind_rows},
+        }
 
     async def media_count(self) -> int:
         rows = await asyncio.to_thread(self._query, "SELECT COUNT(*) AS total FROM media_asset WHERE status<>'deleted'")
@@ -776,6 +877,15 @@ class TaskStore:
             f"SELECT source_event_id,run_id,entity_type,entity_id,payload_json,observed_at,synced_at FROM {table} WHERE user_id=? AND entity_type=? ORDER BY synced_at DESC LIMIT ? OFFSET ?",
             (user_id,entity_type,limit,offset),
         )
+
+    async def count_user_remote_results(self, user_id: str, entity_type: str) -> int:
+        table = "remote_result" if entity_type in {"aweme_metric", "creator_metric", "log"} else "remote_entity"
+        rows = await asyncio.to_thread(
+            self._query,
+            f"SELECT COUNT(*) AS total FROM {table} WHERE user_id=? AND entity_type=?",
+            (user_id, entity_type),
+        )
+        return int(rows[0]["total"] if rows else 0)
 
     async def remote_result_counts(self, user_id: str) -> dict[str, int]:
         rows = await asyncio.to_thread(

@@ -128,7 +128,7 @@ export const taskApi = {
   retry: (id:string) => api.post(`/tasks/${id}/retry-failed`),
 }
 export const mediaApi = {
-  list: () => api.get<{items: import('@/types/product').MediaSummary[]}>('/media'),
+  list: (params: {limit?:number;offset?:number;q?:string;kind?:string;status?:string;sort?:string;aweme_id?:string} = {}) => api.get<import('@/types/product').MediaListResponse>('/media',{params}),
   streamUrl: (id:string) => `/api/media/${id}/stream`,
   remove: (id:string) => api.delete(`/media/${id}`, {params:{confirm:true}}),
 }
@@ -188,7 +188,7 @@ export const remoteApi = {
   runLogs: (id:string) => api.get(`/flowlens/crawl-runs/${id}/logs`,{headers:remoteHeaders()}),
   createRun: (data:Record<string,unknown>) => api.post('/flowlens/crawl-runs',data,{headers:remoteHeaders()}),
   control: (id:string, action:'pause'|'resume'|'cancel'|'retry-failed') => api.post(`/flowlens/crawl-runs/${id}/${action}`,{}, {headers:remoteHeaders()}),
-  results: (kind:string) => api.get(`/flowlens/results/${kind}`,{headers:remoteHeaders()}),
+  results: (kind:string, params: {limit?:number;offset?:number} = {}) => api.get(`/flowlens/results/${kind}`,{headers:remoteHeaders(),params}),
   resultDetail: (id:string) => api.get(`/flowlens/results/aweme/${id}/detail`,{headers:remoteHeaders()}),
   mediaUrl: (id:string) => `/api/flowlens/media/${id}/stream`,
   enrollment: () => api.post('/flowlens/admin/worker-enrollments',{}, {headers:{...remoteHeaders(),'X-FlowLens-Role':'admin'}}),

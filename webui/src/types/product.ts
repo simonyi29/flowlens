@@ -128,3 +128,14 @@ export interface MediaSummary {
   sha256?: string
   [key: string]: unknown
 }
+
+export interface MediaListResponse {
+  items: MediaSummary[]
+  total: number
+  filtered_bytes: number
+  active_total: number
+  status_counts: Record<string, number>
+  kind_counts: Record<string, number>
+  limit: number
+  offset: number
+}
