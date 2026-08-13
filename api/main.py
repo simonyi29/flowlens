@@ -32,7 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import crawler_router, data_router, websocket_router, tasks_router, media_router, schedules_router, library_router, system_router, remote_router, worker_gateway_router
+from .routers import crawler_router, data_router, websocket_router, tasks_router, media_router, schedules_router, library_router, system_router, remote_router, worker_gateway_router, dashboard_router
 from .services.task_store import task_store
 from .services.schedule_runner import schedule_runner
 from .services.crawler_manager import crawler_manager
@@ -72,6 +72,7 @@ app.include_router(media_router, prefix="/api")
 app.include_router(schedules_router, prefix="/api")
 app.include_router(library_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
+app.include_router(dashboard_router, prefix="/api")
 app.include_router(remote_router, prefix="/api")
 app.include_router(worker_gateway_router)
 

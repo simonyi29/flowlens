@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from ..services import crawler_manager
+from ..services.product_views import present_run, safe_error
 from ..services.task_store import task_store
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -8,7 +9,15 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 @router.get("")
 async def list_tasks(limit: int = 100, offset: int = 0):
-    return {"items": await task_store.list_runs(min(max(limit, 1), 500), max(offset, 0))}
+    rows = await task_store.list_runs(min(max(limit, 1), 500), max(offset, 0))
+    items = []
+    for row in rows:
+        items.append(present_run(
+            row,
+            stages=await task_store.list_stages(row["run_id"]),
+            summary=await task_store.run_summary(row["run_id"]),
+        ))
+    return {"items": items}
 
 
 @router.get("/{run_id}")
@@ -16,7 +25,14 @@ async def get_task(run_id: str):
     item = await task_store.get_run(run_id)
     if not item:
         raise HTTPException(404, "Task not found")
-    return {**item, "summary": await task_store.run_summary(run_id), "stages": await task_store.list_stages(run_id)}
+    summary = await task_store.run_summary(run_id)
+    stages = await task_store.list_stages(run_id)
+    return {
+        **present_run(item, stages=stages, summary=summary),
+        "summary": summary,
+        "stages": stages,
+        "error": safe_error(item.get("error_type"), item.get("error_message")),
+    }
 
 
 @router.get("/{run_id}/items")

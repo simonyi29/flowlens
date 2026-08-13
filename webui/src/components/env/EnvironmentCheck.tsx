@@ -41,7 +41,7 @@ export function EnvironmentCheck({ onCheckComplete }: EnvironmentCheckProps) {
       } else {
         setStatus('error')
       }
-    } catch (error) {
+    } catch {
       setResult({
         success: false,
         message: t('defaultError'),

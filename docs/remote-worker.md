@@ -65,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File tools/start_flowlens_worker.ps1
 
 ## 登录与采集流程
 
-1. 用户在“远程采集”选择在线 Worker，点击“连接抖音账号”。
+1. 用户在网站的“抖音账号”页点击“连接抖音账号”；普通用户只看到友好的“执行设备”名称，不需要选择或理解 Worker。
 2. 控制中心生成不可预测的连接、登录会话和 Profile 标识，下发幂等命令。
 3. Worker 获取唯一抖音浏览器槽，以独立 Profile 启动 Chrome，只截取登录二维码区域并通过认证通道上传。
 4. 用户在网站扫描二维码。登录成功后二维码立即从内存删除，网站只保存脱敏昵称和不可逆账号 hash。
@@ -91,7 +91,7 @@ Worker 只会读取本地任务库中已登记、解析后仍位于媒体根目�
 
 ## 网站集成约定
 
-本仓库内置的远程页面是参考控制台。正式接入现有网站时，应复用网站用户会话，并从服务端注入身份头。关键接口包括：
+本仓库内置的远程页面是网站用户端参考实现。正式接入现有网站时，应复用网站用户会话，并从服务端注入身份头。浏览器端不能自行生成这些身份头；`X-FlowLens-Role: admin` 只有同时通过受信代理令牌校验时才生效。关键接口包括：
 
 - `POST /api/flowlens/douyin/login-sessions`
 - `GET /api/flowlens/douyin/login-sessions/{id}/qr`
@@ -99,6 +99,7 @@ Worker 只会读取本地任务库中已登记、解析后仍位于媒体根目�
 - `POST /api/flowlens/crawl-runs`
 - `POST /api/flowlens/crawl-runs/{id}/{pause|resume|cancel|retry-failed}`
 - `GET /api/flowlens/results/{entity_type}`
+- `GET /api/flowlens/results/aweme/{aweme_id}/detail`
 - `GET /api/flowlens/media/{asset_id}/stream`
 
 完整 OpenAPI 可在控制中心 `/docs` 查看。生产网站必须对每个查询和操作保持服务端所有权校验，不能依赖前端隐藏按钮。

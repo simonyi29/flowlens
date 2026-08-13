@@ -150,6 +150,28 @@ uv run uvicorn api.main:app --port 8080
 
 浏览器打开 `http://localhost:8080`。
 
+FlowLens 1.2 的 WebUI 使用 `HashRouter`，默认首页是面向网站用户的数据工作台。主要入口为：
+
+- `/#/connect`：抖音账号连接与扫码状态。
+- `/#/crawl/new`：关键词、话题、视频和账号三步采集向导。
+- `/#/tasks`：任务中心、阶段进度和合法恢复操作。
+- `/#/library`：作品、账号、话题、评论和字幕浏览与导出。
+- `/#/media`：正式媒体状态、播放与安全删除。
+- `/#/settings`：本机模式原有多平台工具与低频高级配置。
+- `/#/admin/*`：仅在服务端能力声明允许时显示的管理员后台。
+
+普通用户页面不显示 Worker、浏览器调试端口、Profile 路径或原始内部状态。前端先读取 `/api/system/capabilities`，再按本机/远程模式和角色决定可用入口。工作台数据由 `/api/dashboard/overview` 聚合，避免首页发起大量分散请求。
+
+前端质量检查：
+
+```shell
+cd webui
+npm run lint
+npm run build
+```
+
+界面设计与实现说明见 [FlowLens WebUI 产品化设计](docs/webui-product-design.md)。
+
 ## 数据输出
 
 抖音 JSONL 默认输出：

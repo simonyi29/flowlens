@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..services.task_store import task_store
+from ..services.product_views import present_run, safe_error
 from ..services import douyin_session_manager
 from ..services.media_relay import MediaRelayOpenError, media_relay_broker
 from ..services.remote_events import remote_event_hub
@@ -361,14 +362,24 @@ async def create_crawl_run(request: RemoteCrawlRequest, user_id: str = Depends(c
 
 @router.get("/crawl-runs")
 async def crawl_runs(user_id: str = Depends(current_user)):
-    return {"items":await task_store.list_user_remote_runs(user_id)}
+    rows = await task_store.list_user_remote_runs(user_id)
+    connections = {item["connection_id"]: item for item in await task_store.list_user_connections(user_id)}
+    return {"items":[present_run(
+        item,
+        account_label=connections.get(item["connection_id"], {}).get("masked_nickname") or "抖音账号",
+        remote=True,
+    ) for item in rows]}
 
 
 @router.get("/crawl-runs/{run_id}")
 async def crawl_run(run_id: str, user_id: str = Depends(current_user)):
     item = await task_store.get_user_remote_run(run_id, user_id)
     if not item: raise HTTPException(404, "crawl run not found")
-    return item
+    connection = await task_store.get_user_connection(item["connection_id"], user_id)
+    return {
+        **present_run(item, account_label=(connection or {}).get("masked_nickname") or "抖音账号", remote=True),
+        "error": safe_error(item.get("error_type"), item.get("error_message")),
+    }
 
 
 @router.get("/crawl-runs/{run_id}/items")
@@ -433,6 +444,62 @@ async def remote_results(entity_type: str, limit: int = 50, offset: int = 0,
     for row in rows:
         row["payload"] = json.loads(row.pop("payload_json"))
     return {"items":rows}
+
+
+@router.get("/results/aweme/{aweme_id}/detail")
+async def remote_aweme_detail(aweme_id: str, user_id: str = Depends(current_user)):
+    aweme = await task_store.get_user_remote_result(user_id, "aweme", aweme_id)
+    if not aweme:
+        raise HTTPException(404, "aweme result not found")
+
+    def payload(row: dict) -> dict:
+        value = json.loads(row.get("payload_json") or "{}")
+        return value if isinstance(value, dict) else {}
+
+    aweme_payload = payload(aweme)
+    comments, transcripts, metrics, media = await asyncio.gather(
+        task_store.list_user_remote_results(user_id, "comment", 500, 0),
+        task_store.list_user_remote_results(user_id, "transcript", 100, 0),
+        task_store.list_user_remote_results(user_id, "aweme_metric", 500, 0),
+        task_store.list_user_remote_results(user_id, "media", 500, 0),
+    )
+    comment_payloads = []
+    for row in comments:
+        item = payload(row)
+        if str(item.get("aweme_id") or "") == aweme_id:
+            comment_payloads.append(item)
+    roots, children = [], {}
+    for item in comment_payloads:
+        if int(item.get("level") or 1) == 1:
+            roots.append(item)
+        else:
+            children.setdefault(str(item.get("root_comment_id") or item.get("parent_comment_id") or ""), []).append(item)
+    for root in roots:
+        root["replies"] = children.get(str(root.get("comment_id") or ""), [])
+    transcript = None
+    for row in transcripts:
+        item = payload(row)
+        if str(row.get("entity_id") or item.get("aweme_id") or "") == aweme_id:
+            transcript = item
+            break
+    metric_payloads = []
+    for row in metrics:
+        item = payload(row)
+        if str(item.get("aweme_id") or "") == aweme_id:
+            metric_payloads.append(item)
+    media_payloads = []
+    for row in media:
+        item = payload(row)
+        if str(item.get("aweme_id") or "") == aweme_id:
+            item.setdefault("asset_id", row.get("entity_id"))
+            media_payloads.append(item)
+    return {
+        "aweme": aweme_payload,
+        "transcript": transcript,
+        "metrics": metric_payloads,
+        "comments": roots,
+        "media": media_payloads,
+    }
 
 
 @router.get("/media/{asset_id}/stream")

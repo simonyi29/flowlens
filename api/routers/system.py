@@ -1,9 +1,11 @@
 import importlib.util
+import hmac
 import os
 import shutil
 import socket
 import sqlite3
 import httpx
+from fastapi import Header
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -13,6 +15,34 @@ from ..services.task_store import DB_PATH
 router = APIRouter(prefix="/system", tags=["system"])
 ROOT = Path(__file__).resolve().parents[2]
 MEDIA = ROOT / "data" / "douyin" / "media"
+
+
+@router.get("/capabilities")
+async def capabilities(
+    x_flowlens_role: str | None = Header(None),
+    x_flowlens_proxy_token: str | None = Header(None),
+):
+    remote = os.getenv("FLOWLENS_REMOTE_WORKER", "false").lower() in {"1", "true", "yes"}
+    expected = os.getenv("FLOWLENS_TRUSTED_PROXY_TOKEN", "")
+    trusted = bool(
+        remote
+        and expected
+        and x_flowlens_proxy_token
+        and hmac.compare_digest(expected, x_flowlens_proxy_token)
+    )
+    is_admin = not remote or (trusted and x_flowlens_role == "admin")
+    return {
+        "mode": "remote" if remote else "local",
+        "current_role": "admin" if is_admin else "user",
+        "features": {
+            "remote_worker": remote,
+            "local_crawl": not remote,
+            "schedules": True,
+            "media_stream": True,
+            "asr": importlib.util.find_spec("faster_whisper") is not None,
+            "admin": is_admin,
+        },
+    }
 
 
 def _directory_size(path: Path): return sum(p.stat().st_size for p in path.rglob("*") if p.is_file()) if path.exists() else 0

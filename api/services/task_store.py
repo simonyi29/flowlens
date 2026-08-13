@@ -382,6 +382,10 @@ class TaskStore:
             return await asyncio.to_thread(self._query, "SELECT * FROM media_asset WHERE aweme_id=? ORDER BY updated_at DESC LIMIT ? OFFSET ?", (aweme_id,limit,offset))
         return await asyncio.to_thread(self._query, "SELECT * FROM media_asset ORDER BY updated_at DESC LIMIT ? OFFSET ?", (limit,offset))
 
+    async def media_count(self) -> int:
+        rows = await asyncio.to_thread(self._query, "SELECT COUNT(*) AS total FROM media_asset WHERE status<>'deleted'")
+        return int(rows[0]["total"] if rows else 0)
+
     async def run_summary(self, run_id: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._run_summary_sync, run_id)
 
@@ -707,6 +711,34 @@ class TaskStore:
             f"SELECT source_event_id,run_id,entity_type,entity_id,payload_json,observed_at,synced_at FROM {table} WHERE user_id=? AND entity_type=? ORDER BY synced_at DESC LIMIT ? OFFSET ?",
             (user_id,entity_type,limit,offset),
         )
+
+    async def remote_result_counts(self, user_id: str) -> dict[str, int]:
+        rows = await asyncio.to_thread(
+            self._query,
+            "SELECT entity_type,COUNT(*) AS total FROM remote_entity WHERE user_id=? GROUP BY entity_type",
+            (user_id,),
+        )
+        values = {str(row["entity_type"]): int(row["total"]) for row in rows}
+        comments = await asyncio.to_thread(
+            self._query,
+            "SELECT payload_json FROM remote_entity WHERE user_id=? AND entity_type='comment'",
+            (user_id,),
+        )
+        replies = 0
+        for row in comments:
+            try:
+                replies += int(json.loads(row["payload_json"] or "{}").get("level") or 1) == 2
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return {
+            "awemes": values.get("aweme", 0),
+            "creators": values.get("creator", 0),
+            "topics": values.get("topic", 0),
+            "comments": values.get("comment", 0),
+            "replies": replies,
+            "transcripts": values.get("transcript", 0),
+            "media": values.get("media", 0),
+        }
 
     async def get_user_remote_result(self, user_id: str, entity_type: str, entity_id: str):
         table = "remote_result" if entity_type in {"aweme_metric", "creator_metric", "log"} else "remote_entity"

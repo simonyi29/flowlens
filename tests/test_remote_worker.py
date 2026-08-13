@@ -203,6 +203,32 @@ def test_remote_api_requires_trusted_proxy_and_isolates_users(monkeypatch, tmp_p
     }, headers=headers_a)
     assert rejected.status_code == 422
 
+    async def seed_results():
+        common = {
+            "user_id":"user-a", "connection_id":session["connection_id"],
+            "run_id":run_id, "worker_id":"worker-1",
+        }
+        items = [
+            ("event-aweme", "aweme", "aweme-1", {"aweme_id":"aweme-1", "title":"测试作品"}),
+            ("event-root", "comment", "comment-1", {"aweme_id":"aweme-1", "comment_id":"comment-1", "level":1, "content":"一级"}),
+            ("event-reply", "comment", "comment-2", {"aweme_id":"aweme-1", "comment_id":"comment-2", "root_comment_id":"comment-1", "level":2, "content":"回复"}),
+            ("event-transcript", "transcript", "aweme-1", {"aweme_id":"aweme-1", "full_text":"字幕"}),
+            ("event-metric", "aweme_metric", "metric-1", {"aweme_id":"aweme-1", "liked_count":12}),
+            ("event-media", "media", "asset-1", {"aweme_id":"aweme-1", "kind":"video", "status":"completed"}),
+        ]
+        for event_id, entity_type, entity_id, payload in items:
+            await store.store_remote_result({
+                **common, "source_event_id":event_id, "entity_type":entity_type,
+                "entity_id":entity_id, "payload":payload,
+            })
+
+    asyncio.run(seed_results())
+    detail = client.get("/api/flowlens/results/aweme/aweme-1/detail", headers=headers_a)
+    assert detail.status_code == 200
+    assert detail.json()["comments"][0]["replies"][0]["content"] == "回复"
+    assert detail.json()["media"][0]["asset_id"] == "asset-1"
+    assert client.get("/api/flowlens/results/aweme/aweme-1/detail", headers=headers_b).status_code == 404
+
 
 def test_worker_agent_executes_each_command_once(tmp_path):
     async def scenario():

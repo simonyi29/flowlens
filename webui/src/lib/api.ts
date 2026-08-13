@@ -77,7 +77,7 @@ export interface ConfigOption {
 
 // API functions
 export const crawlerApi = {
-  start: (config: CrawlerConfig) => api.post('/crawler/start', config),
+  start: (config: CrawlerConfig | Record<string, unknown>) => api.post('/crawler/start', config),
   stop: () => api.post('/crawler/stop'),
   getStatus: () => api.get<CrawlerStatus>('/crawler/status'),
   getLogs: (limit = 100) => api.get<{ logs: LogEntry[] }>('/crawler/logs', { params: { limit } }),
@@ -117,8 +117,8 @@ export const envApi = {
 }
 
 export const taskApi = {
-  list: () => api.get<{items: import('@/types/crawler').TaskRun[]}>('/tasks'),
-  detail: (id:string) => api.get(`/tasks/${id}`),
+  list: () => api.get<{items: import('@/types/product').TaskSummary[]}>('/tasks'),
+  detail: (id:string) => api.get<import('@/types/product').TaskSummary & Record<string, unknown>>(`/tasks/${id}`),
   items: (id:string) => api.get(`/tasks/${id}/items`),
   logs: (id:string) => api.get(`/tasks/${id}/logs`),
   pause: (id:string) => api.post(`/tasks/${id}/pause`),
@@ -128,7 +128,7 @@ export const taskApi = {
   retry: (id:string) => api.post(`/tasks/${id}/retry-failed`),
 }
 export const mediaApi = {
-  list: () => api.get<{items: import('@/types/crawler').MediaAsset[]}>('/media'),
+  list: () => api.get<{items: import('@/types/product').MediaSummary[]}>('/media'),
   streamUrl: (id:string) => `/api/media/${id}/stream`,
   remove: (id:string) => api.delete(`/media/${id}`, {params:{confirm:true}}),
 }
@@ -141,7 +141,11 @@ export const libraryApi = {
   detail: (id:string) => api.get(`/library/awemes/${id}`),
   search: (q:string) => api.get('/library/search',{params:{q}}),
   stats: () => api.get('/library/stats'),
-  exportUrl: (format:'jsonl'|'csv',q='') => `/api/library/export?format=${format}&q=${encodeURIComponent(q)}`,
+  exportUrl: (format:'jsonl'|'csv',q='',filters:Record<string,unknown>={}) => {
+    const params = new URLSearchParams({format,q})
+    Object.entries(filters).forEach(([key,value])=>{if(value!==''&&value!=null)params.set(key,String(value))})
+    return `/api/library/export?${params.toString()}`
+  },
 }
 export const scheduleApi = {
   list: () => api.get<{items: Record<string,unknown>[]}>('/schedules'),
@@ -150,13 +154,24 @@ export const scheduleApi = {
   run: (id:string) => api.post(`/schedules/${id}/run-now`),
   remove: (id:string) => api.delete(`/schedules/${id}`),
 }
-export const systemApi = { health:()=>api.get('/system/health'), storage:()=>api.get('/system/storage') }
 
 const remoteHeaders = () => {
   const token = import.meta.env.VITE_FLOWLENS_PROXY_TOKEN as string | undefined
   const user = import.meta.env.VITE_FLOWLENS_USER_ID as string | undefined
   return token && user ? {'X-FlowLens-Proxy-Token':token, 'X-FlowLens-User-ID':user} : {}
 }
+
+export const systemApi = {
+  health:()=>api.get('/system/health'),
+  storage:()=>api.get('/system/storage'),
+  capabilities: () => api.get<import('@/types/product').Capabilities>('/system/capabilities', {headers:remoteHeaders()}),
+}
+
+export const productApi = {
+  capabilities: systemApi.capabilities,
+  overview: () => api.get<import('@/types/product').DashboardOverview>('/dashboard/overview', {headers:remoteHeaders()}),
+}
+
 export const remoteApi = {
   workers: () => api.get('/flowlens/workers',{headers:remoteHeaders()}),
   connections: () => api.get('/flowlens/douyin/connections',{headers:remoteHeaders()}),
@@ -168,9 +183,13 @@ export const remoteApi = {
   disconnect: (id:string) => api.delete(`/flowlens/douyin/connections/${id}`,{headers:remoteHeaders(),params:{confirm:true}}),
   reconnect: (id:string) => api.post(`/flowlens/douyin/connections/${id}/login-session`,{}, {headers:remoteHeaders()}),
   runs: () => api.get('/flowlens/crawl-runs',{headers:remoteHeaders()}),
+  run: (id:string) => api.get(`/flowlens/crawl-runs/${id}`,{headers:remoteHeaders()}),
+  runItems: (id:string) => api.get(`/flowlens/crawl-runs/${id}/items`,{headers:remoteHeaders()}),
+  runLogs: (id:string) => api.get(`/flowlens/crawl-runs/${id}/logs`,{headers:remoteHeaders()}),
   createRun: (data:Record<string,unknown>) => api.post('/flowlens/crawl-runs',data,{headers:remoteHeaders()}),
   control: (id:string, action:'pause'|'resume'|'cancel'|'retry-failed') => api.post(`/flowlens/crawl-runs/${id}/${action}`,{}, {headers:remoteHeaders()}),
   results: (kind:string) => api.get(`/flowlens/results/${kind}`,{headers:remoteHeaders()}),
+  resultDetail: (id:string) => api.get(`/flowlens/results/aweme/${id}/detail`,{headers:remoteHeaders()}),
   mediaUrl: (id:string) => `/api/flowlens/media/${id}/stream`,
   enrollment: () => api.post('/flowlens/admin/worker-enrollments',{}, {headers:{...remoteHeaders(),'X-FlowLens-Role':'admin'}}),
   adminWorkers: () => api.get('/flowlens/admin/workers',{headers:{...remoteHeaders(),'X-FlowLens-Role':'admin'}}),

@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 router = APIRouter(prefix="/library", tags=["library"])
 DB_PATH = Path(__file__).resolve().parents[2] / "database" / "sqlite_tables.db"
+TASK_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "flowlens" / "tasks.sqlite"
 
 
 def _db():
@@ -61,14 +62,44 @@ def _paged_table(table: str, order: str, where: list[str], args: list, limit: in
 
 @router.get("/awemes")
 async def list_awemes(q: str = "", creator_hash: str = "", source_topic: str = "",
-                      min_likes: int | None = None, limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
+                      source_keyword: str = "", min_likes: int | None = None,
+                      max_likes: int | None = None, min_comments: int | None = None,
+                      max_comments: int | None = None, min_plays: int | None = None,
+                      max_plays: int | None = None, published_from: int | None = None,
+                      published_to: int | None = None, transcript_status: str = "",
+                      comment_status: str = "", download_status: str = "",
+                      limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0)):
     where, args = [], []
     if q: where.append("(title LIKE ? OR desc LIKE ?)"); args += [f"%{q}%", f"%{q}%"]
     if creator_hash: where.append("creator_hash=?"); args.append(creator_hash)
     if source_topic: where.append("source_topic=?"); args.append(source_topic)
+    if source_keyword: where.append("source_keyword=?"); args.append(source_keyword)
     if min_likes is not None: where.append("liked_count>=?"); args.append(min_likes)
+    if max_likes is not None: where.append("liked_count<=?"); args.append(max_likes)
+    if min_comments is not None: where.append("comment_count>=?"); args.append(min_comments)
+    if max_comments is not None: where.append("comment_count<=?"); args.append(max_comments)
+    if min_plays is not None: where.append("play_count>=?"); args.append(min_plays)
+    if max_plays is not None: where.append("play_count<=?"); args.append(max_plays)
+    if published_from is not None: where.append("create_time>=?"); args.append(published_from)
+    if published_to is not None: where.append("create_time<=?"); args.append(published_to)
+    if transcript_status:
+        where.append("EXISTS (SELECT 1 FROM douyin_transcript t WHERE t.aweme_id=douyin_aweme.aweme_id AND t.status=?)")
+        args.append(transcript_status)
+    if comment_status == "completed":
+        where.append("EXISTS (SELECT 1 FROM douyin_aweme_comment c WHERE c.aweme_id=douyin_aweme.aweme_id)")
+    elif comment_status == "empty":
+        where.append("NOT EXISTS (SELECT 1 FROM douyin_aweme_comment c WHERE c.aweme_id=douyin_aweme.aweme_id)")
+    media_db = TASK_DB_PATH
+    if download_status:
+        if media_db.exists():
+            where.append("EXISTS (SELECT 1 FROM taskdb.media_asset m WHERE m.aweme_id=douyin_aweme.aweme_id AND m.status=?)")
+            args.append(download_status)
+        else:
+            where.append("1=0")
     clause = " WHERE " + " AND ".join(where) if where else ""
     with _db() as db:
+        if download_status and media_db.exists():
+            db.execute("ATTACH DATABASE ? AS taskdb", (str(media_db),))
         total = db.execute("SELECT COUNT(*) FROM douyin_aweme" + clause, args).fetchone()[0]
         rows = [dict(r) for r in db.execute("SELECT * FROM douyin_aweme" + clause + " ORDER BY collected_at DESC LIMIT ? OFFSET ?", args+[limit,offset])]
     return {"items": rows, "total": total, "limit": limit, "offset": offset}
@@ -170,8 +201,22 @@ async def library_stats():
 
 
 @router.get("/export")
-async def export_awemes(format: str = "jsonl", q: str = ""):
-    data = await list_awemes(q=q, limit=500, offset=0)
+async def export_awemes(
+    format: str = "jsonl", q: str = "", creator_hash: str = "", source_topic: str = "",
+    source_keyword: str = "", min_likes: int | None = None, max_likes: int | None = None,
+    min_comments: int | None = None, max_comments: int | None = None,
+    min_plays: int | None = None, max_plays: int | None = None,
+    published_from: int | None = None, published_to: int | None = None,
+    transcript_status: str = "", comment_status: str = "", download_status: str = "",
+):
+    data = await list_awemes(
+        q=q, creator_hash=creator_hash, source_topic=source_topic, source_keyword=source_keyword,
+        min_likes=min_likes, max_likes=max_likes, min_comments=min_comments,
+        max_comments=max_comments, min_plays=min_plays, max_plays=max_plays,
+        published_from=published_from, published_to=published_to,
+        transcript_status=transcript_status, comment_status=comment_status,
+        download_status=download_status, limit=500, offset=0,
+    )
     if format == "jsonl":
         body = "".join(json.dumps(x,ensure_ascii=False)+"\n" for x in data["items"])
         return StreamingResponse(iter([body]), media_type="application/x-ndjson", headers={"Content-Disposition":"attachment; filename=awemes.jsonl"})
