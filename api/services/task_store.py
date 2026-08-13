@@ -85,8 +85,75 @@ class TaskStore:
               first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, last_run_id TEXT,
               PRIMARY KEY(platform, entity_type, entity_id)
             );
+            CREATE TABLE IF NOT EXISTS worker_identity (
+              worker_id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key TEXT NOT NULL,
+              private_key_path TEXT NOT NULL, protocol_version TEXT NOT NULL,
+              created_at TEXT NOT NULL, revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS browser_profile (
+              profile_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL UNIQUE,
+              tenant_hash TEXT NOT NULL, status TEXT NOT NULL, profile_path TEXT NOT NULL,
+              pid INTEGER, cdp_port INTEGER, last_checked_at TEXT, created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS login_session (
+              login_session_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL,
+              profile_id TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL,
+              error_type TEXT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              FOREIGN KEY(profile_id) REFERENCES browser_profile(profile_id)
+            );
+            CREATE TABLE IF NOT EXISTS worker_command (
+              command_id TEXT PRIMARY KEY, command_type TEXT NOT NULL, status TEXT NOT NULL,
+              result_json TEXT, received_at TEXT NOT NULL, completed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS sync_outbox (
+              sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
+              event_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL,
+              retry_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+              acknowledged_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_outbox_pending ON sync_outbox(status, sequence);
+            CREATE TABLE IF NOT EXISTS media_stream_session (
+              stream_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, status TEXT NOT NULL,
+              range_start INTEGER, range_end INTEGER, expires_at TEXT NOT NULL,
+              created_at TEXT NOT NULL, completed_at TEXT,
+              FOREIGN KEY(asset_id) REFERENCES media_asset(asset_id)
+            );
+            CREATE TABLE IF NOT EXISTS flowlens_worker (
+              worker_id TEXT PRIMARY KEY, name TEXT NOT NULL, public_key TEXT NOT NULL,
+              status TEXT NOT NULL, version TEXT, protocol_version TEXT NOT NULL DEFAULT '1.0',
+              capabilities_json TEXT NOT NULL DEFAULT '{}', browser_slots INTEGER NOT NULL DEFAULT 1,
+              last_heartbeat_at TEXT, registered_at TEXT NOT NULL, revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS douyin_connection (
+              connection_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+              profile_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, creator_hash TEXT,
+              masked_nickname TEXT, last_verified_at TEXT, created_at TEXT NOT NULL,
+              disconnected_at TEXT, FOREIGN KEY(worker_id) REFERENCES flowlens_worker(worker_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_connection_user ON douyin_connection(user_id, created_at);
+            CREATE TABLE IF NOT EXISTS remote_crawl_run (
+              run_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+              worker_id TEXT NOT NULL, worker_run_id TEXT, status TEXT NOT NULL,
+              stage TEXT NOT NULL DEFAULT 'discover', sanitized_config_json TEXT NOT NULL,
+              created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+              error_type TEXT, error_message TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_remote_run_user ON remote_crawl_run(user_id, created_at);
+            CREATE TABLE IF NOT EXISTS worker_event (
+              event_id TEXT PRIMARY KEY, worker_id TEXT NOT NULL, event_type TEXT NOT NULL,
+              run_id TEXT, sequence INTEGER NOT NULL, received_at TEXT NOT NULL, processed_at TEXT
+            );
             """)
+            self._ensure_columns(db, "login_session", {"user_id":"TEXT", "worker_id":"TEXT"})
             db.execute("UPDATE crawl_run SET status='partial', finished_at=? WHERE status IN ('running','pausing')", (_now(),))
+
+    @staticmethod
+    def _ensure_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        for name, declaration in columns.items():
+            if name not in existing:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
     async def create_run(self, config: dict[str, Any]) -> str:
         run_id = uuid.uuid4().hex
@@ -314,6 +381,140 @@ class TaskStore:
     async def get_media(self, asset_id):
         rows = await asyncio.to_thread(self._query, "SELECT * FROM media_asset WHERE asset_id=?", (asset_id,))
         return rows[0] if rows else None
+
+    async def enqueue_outbox(self, event_type: str, payload: dict[str, Any], event_id: str | None = None) -> str:
+        from .worker_security import sanitize_worker_payload
+        event_id = event_id or uuid.uuid4().hex
+        safe_payload = sanitize_worker_payload(payload)
+        sql = "INSERT OR IGNORE INTO sync_outbox(event_id,event_type,payload_json,status,created_at) VALUES(?,?,?,'pending',?)"
+        async with self._lock:
+            await asyncio.to_thread(self._execute, sql, (event_id, event_type, json.dumps(safe_payload, ensure_ascii=False), _now()))
+        return event_id
+
+    async def pending_outbox(self, limit: int = 500):
+        return await asyncio.to_thread(
+            self._query,
+            "SELECT * FROM sync_outbox WHERE status IN ('pending','sending','failed') ORDER BY sequence LIMIT ?",
+            (limit,),
+        )
+
+    async def ack_outbox(self, through_sequence: int) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE sync_outbox SET status='acknowledged',acknowledged_at=? WHERE sequence<=? AND status<>'acknowledged'",
+                (_now(), through_sequence),
+            )
+
+    async def save_browser_profile(self, item: dict[str, Any]) -> None:
+        now = _now()
+        values = (
+            item["profile_id"], item["connection_id"], item["tenant_hash"],
+            item.get("status", "creating"), item["profile_path"], item.get("pid"),
+            item.get("cdp_port"), item.get("last_checked_at"), now, now,
+        )
+        sql = """INSERT INTO browser_profile(profile_id,connection_id,tenant_hash,status,profile_path,pid,cdp_port,last_checked_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_id) DO UPDATE SET
+        status=excluded.status,pid=excluded.pid,cdp_port=excluded.cdp_port,
+        last_checked_at=excluded.last_checked_at,updated_at=excluded.updated_at"""
+        async with self._lock:
+            await asyncio.to_thread(self._execute, sql, values)
+
+    async def get_browser_profile(self, profile_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM browser_profile WHERE profile_id=?", (profile_id,))
+        return rows[0] if rows else None
+
+    async def get_profile_by_connection(self, connection_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM browser_profile WHERE connection_id=?", (connection_id,))
+        return rows[0] if rows else None
+
+    async def save_login_session(self, item: dict[str, Any]) -> None:
+        now = _now()
+        values = (
+            item["login_session_id"], item["connection_id"], item["profile_id"],
+            item.get("status", "queued"), item["expires_at"], item.get("error_type"),
+            item.get("error_message"), now, now, item.get("user_id"), item.get("worker_id"),
+        )
+        sql = """INSERT INTO login_session(login_session_id,connection_id,profile_id,status,expires_at,error_type,error_message,created_at,updated_at,user_id,worker_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(login_session_id) DO UPDATE SET
+        status=excluded.status,expires_at=excluded.expires_at,error_type=excluded.error_type,
+        error_message=excluded.error_message,updated_at=excluded.updated_at"""
+        async with self._lock:
+            await asyncio.to_thread(self._execute, sql, values)
+
+    async def get_login_session(self, login_session_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM login_session WHERE login_session_id=?", (login_session_id,))
+        return rows[0] if rows else None
+
+    async def get_user_login_session(self, login_session_id: str, user_id: str):
+        rows = await asyncio.to_thread(
+            self._query, "SELECT * FROM login_session WHERE login_session_id=? AND user_id=?", (login_session_id, user_id)
+        )
+        return rows[0] if rows else None
+
+    async def update_login_session(self, login_session_id: str, status: str, *, error_type: str | None = None,
+                                   error_message: str | None = None) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE login_session SET status=?,error_type=?,error_message=?,updated_at=? WHERE login_session_id=?",
+                (status, error_type, error_message, _now(), login_session_id),
+            )
+
+    async def claim_worker_command(self, command_id: str, command_type: str) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(self._claim_worker_command_sync, command_id, command_type)
+
+    def _claim_worker_command_sync(self, command_id: str, command_type: str) -> bool:
+        with self._connect() as db:
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO worker_command(command_id,command_type,status,received_at) VALUES(?,?,'running',?)",
+                (command_id, command_type, _now()),
+            )
+            return bool(cursor.rowcount)
+
+    async def upsert_worker(self, item: dict[str, Any]) -> None:
+        await self.initialize()
+        now = _now()
+        values = (
+            item["worker_id"], item.get("name", item["worker_id"]), item["public_key"],
+            item.get("status", "offline"), item.get("version"), item.get("protocol_version", "1.0"),
+            json.dumps(item.get("capabilities", {}), ensure_ascii=False), int(item.get("browser_slots", 1)),
+            item.get("last_heartbeat_at", now), now,
+        )
+        sql = """INSERT INTO flowlens_worker(worker_id,name,public_key,status,version,protocol_version,capabilities_json,browser_slots,last_heartbeat_at,registered_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(worker_id) DO UPDATE SET
+        name=excluded.name,status=excluded.status,version=excluded.version,
+        capabilities_json=excluded.capabilities_json,last_heartbeat_at=excluded.last_heartbeat_at"""
+        async with self._lock:
+            await asyncio.to_thread(self._execute, sql, values)
+
+    async def get_worker(self, worker_id: str):
+        rows = await asyncio.to_thread(self._query, "SELECT * FROM flowlens_worker WHERE worker_id=? AND revoked_at IS NULL", (worker_id,))
+        return rows[0] if rows else None
+
+    async def list_workers(self):
+        return await asyncio.to_thread(self._query, "SELECT worker_id,name,status,version,browser_slots,last_heartbeat_at FROM flowlens_worker WHERE revoked_at IS NULL ORDER BY registered_at")
+
+    async def save_connection(self, item: dict[str, Any]) -> None:
+        sql = """INSERT INTO douyin_connection(connection_id,user_id,worker_id,profile_id,status,creator_hash,masked_nickname,last_verified_at,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id) DO UPDATE SET
+        status=excluded.status,creator_hash=excluded.creator_hash,masked_nickname=excluded.masked_nickname,
+        last_verified_at=excluded.last_verified_at"""
+        values = (
+            item["connection_id"], item["user_id"], item["worker_id"], item["profile_id"],
+            item.get("status", "creating"), item.get("creator_hash"), item.get("masked_nickname"),
+            item.get("last_verified_at"), item.get("created_at", _now()),
+        )
+        async with self._lock:
+            await asyncio.to_thread(self._execute, sql, values)
+
+    async def list_user_connections(self, user_id: str):
+        return await asyncio.to_thread(
+            self._query,
+            "SELECT connection_id,worker_id,status,creator_hash,masked_nickname,last_verified_at,created_at FROM douyin_connection WHERE user_id=? ORDER BY created_at DESC",
+            (user_id,),
+        )
 
     async def save_schedule(self, item: dict[str, Any], schedule_id: str | None = None) -> str:
         schedule_id = schedule_id or uuid.uuid4().hex
