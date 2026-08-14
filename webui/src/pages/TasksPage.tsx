@@ -32,6 +32,8 @@ export default function TasksPage() {
   const [total, setTotal] = useState(0)
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(true)
+  const [connections, setConnections] = useState<Record<string,unknown>[]>([])
+  const [connectionId, setConnectionId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<TaskSummary | null>(null)
   const [deleting, setDeleting] = useState(false)
 
@@ -43,6 +45,7 @@ export default function TasksPage() {
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
         status: filter === 'all' ? undefined : filter,
+        connection_id: remote && connectionId ? connectionId : undefined,
       }
       const response = remote ? await remoteApi.runs(params) : await taskApi.list(params)
       setItems(response.data.items)
@@ -53,7 +56,9 @@ export default function TasksPage() {
     } finally {
       if (!quiet) setLoading(false)
     }
-  }, [capabilities.data, filter, page, remote, t])
+  }, [capabilities.data, connectionId, filter, page, remote, t])
+
+  useEffect(()=>{if(remote)remoteApi.connections().then(response=>setConnections(response.data.items.filter((item:Record<string,unknown>)=>item.status!=='disconnected'))).catch(()=>setConnections([]))},[remote])
 
   useEffect(() => {
     void load()
@@ -127,6 +132,7 @@ export default function TasksPage() {
       description={t('tasks.description')}
       actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'animate-spin' : ''}/>{t('tasks.refresh')}</Button>}
     />
+    {remote&&connections.length>1?<div className="mb-3 max-w-sm"><label className="text-xs font-medium text-slate-600">抖音账号<select value={connectionId} onChange={event=>{setConnectionId(event.target.value);setPage(1)}} className="mt-1.5 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm"><option value="">全部账号</option>{connections.map(item=><option key={String(item.connection_id)} value={String(item.connection_id)}>{String(item.display_name||item.remark||item.masked_nickname||'抖音账号')}</option>)}</select></label></div>:null}
     <div className="mb-4 flex gap-2 overflow-x-auto pb-1" role="tablist" aria-label={t('tasks.title')}>
       {statusFilters.map(status => <button
         key={status}

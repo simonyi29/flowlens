@@ -109,6 +109,27 @@ async def _receive_worker_message(worker: dict, message: dict) -> dict | None:
                 await task_store.update_remote_run(
                     run_id, "running", worker_run_id=str(worker_run_id)
                 )
+        asset_id = str(result.get("asset_id") or "")
+        if asset_id and result.get("status") in {"deleted", "not_found"}:
+            if run and run["worker_id"] == worker["worker_id"]:
+                await task_store.update_remote_media_status(
+                    asset_id, worker["worker_id"], str(result["status"]),
+                    user_id=run["user_id"], deleted=result["status"] == "deleted",
+                )
+        connection_id = str(result.get("connection_id") or "")
+        connection_status = str(result.get("connection_status") or "")
+        if connection_id and connection_status:
+            connection = await task_store.get_connection(connection_id)
+            if connection and connection["worker_id"] == worker["worker_id"]:
+                await task_store.update_connection(
+                    connection_id, connection_status,
+                    creator_hash=result.get("creator_hash"),
+                    masked_nickname=result.get("masked_nickname"),
+                )
+                remote_event_hub.publish(connection["user_id"], {
+                    "event":"connection.status", "connection_id":connection_id,
+                    "status":connection_status,
+                })
         if message.get("outbox_event_id"):
             return {"type":"outbox.ack", "event_id":message["outbox_event_id"]}
     elif kind == "result.event":

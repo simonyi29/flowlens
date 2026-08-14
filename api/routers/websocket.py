@@ -22,6 +22,7 @@ from typing import Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..services import crawler_manager
+from ..services.auth import identity_from_token, remote_mode, SESSION_COOKIE
 
 router = APIRouter(tags=["websocket"])
 
@@ -90,6 +91,15 @@ def start_broadcaster():
 async def websocket_logs(websocket: WebSocket):
     """WebSocket log stream"""
     print("[WS] New connection attempt")
+    if remote_mode():
+        identity = await identity_from_token(websocket.cookies.get(SESSION_COOKIE))
+        # The old global log stream is intentionally disabled in multi-user
+        # remote mode. Per-user logs use /api/flowlens/events.
+        if not identity or identity.status != "active" or identity.must_change_password:
+            await websocket.close(code=1008)
+            return
+        await websocket.close(code=1008)
+        return
 
     try:
         # Ensure broadcast task is running
@@ -137,6 +147,9 @@ async def websocket_logs(websocket: WebSocket):
 @router.websocket("/ws/status")
 async def websocket_status(websocket: WebSocket):
     """WebSocket status stream"""
+    if remote_mode():
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
 
     try:

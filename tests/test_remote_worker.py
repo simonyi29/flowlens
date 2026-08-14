@@ -164,12 +164,19 @@ def test_remote_api_requires_trusted_proxy_and_isolates_users(monkeypatch, tmp_p
     monkeypatch.setattr(douyin_session_manager, "profile_directory", ProfileDirectory(tmp_path / "profiles"))
     monkeypatch.setenv("FLOWLENS_REMOTE_WORKER", "true")
     monkeypatch.setenv("FLOWLENS_TRUSTED_PROXY_TOKEN", "test-proxy-token")
+    monkeypatch.setenv("FLOWLENS_TRUSTED_HEADER_COMPAT", "true")
     asyncio.run(store.upsert_worker({"worker_id":"worker-1","name":"test","public_key":"key","status":"online"}))
+    for user_id in ("user-a", "user-b"):
+        asyncio.run(store.create_user({
+            "user_id": user_id, "username": user_id, "normalized_username": user_id,
+            "display_name": user_id, "password_hash": "!compat!", "role": "user",
+            "status": "active", "must_change_password": False,
+        }))
     client = TestClient(app)
     assert client.get("/api/flowlens/douyin/connections").status_code == 401
     headers_a = {"X-FlowLens-Proxy-Token":"test-proxy-token", "X-FlowLens-User-ID":"user-a"}
     headers_b = {"X-FlowLens-Proxy-Token":"test-proxy-token", "X-FlowLens-User-ID":"user-b"}
-    created = client.post("/api/flowlens/douyin/login-sessions", json={"worker_id":"worker-1"}, headers=headers_a)
+    created = client.post("/api/flowlens/douyin/login-sessions", json={}, headers=headers_a)
     assert created.status_code == 200
     session_id = created.json()["login_session_id"]
     command = asyncio.run(store.pending_outbox_for_worker("worker-1"))[0]

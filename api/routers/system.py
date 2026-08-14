@@ -1,16 +1,16 @@
 import importlib.util
-import hmac
 import os
 import shutil
 import socket
 import sqlite3
 import httpx
-from fastapi import Header
+from fastapi import Depends
 from pathlib import Path
 
 from fastapi import APIRouter
 
 from ..services.task_store import DB_PATH
+from ..services.auth import Identity, optional_current_identity
 
 router = APIRouter(prefix="/system", tags=["system"])
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,28 +19,22 @@ MEDIA = ROOT / "data" / "douyin" / "media"
 
 @router.get("/capabilities")
 async def capabilities(
-    x_flowlens_role: str | None = Header(None),
-    x_flowlens_proxy_token: str | None = Header(None),
+    identity: Identity | None = Depends(optional_current_identity),
 ):
     remote = os.getenv("FLOWLENS_REMOTE_WORKER", "false").lower() in {"1", "true", "yes"}
-    expected = os.getenv("FLOWLENS_TRUSTED_PROXY_TOKEN", "")
-    trusted = bool(
-        remote
-        and expected
-        and x_flowlens_proxy_token
-        and hmac.compare_digest(expected, x_flowlens_proxy_token)
-    )
-    is_admin = not remote or (trusted and x_flowlens_role == "admin")
+    is_admin = bool(identity and identity.role == "admin" and not identity.must_change_password)
     return {
         "mode": "remote" if remote else "local",
         "current_role": "admin" if is_admin else "user",
         "features": {
             "remote_worker": remote,
             "local_crawl": not remote,
+            "multiple_douyin_connections": True,
             "schedules": True,
             "media_stream": True,
             "asr": importlib.util.find_spec("faster_whisper") is not None,
             "admin": is_admin,
+            "admin_console": is_admin,
         },
     }
 
@@ -84,11 +78,18 @@ async def health():
         except Exception:
             cuda_devices = 0
     ffprobe_path = shutil.which("ffprobe")
-    return {"status":"ok","checks":{
+    remote = os.getenv("FLOWLENS_REMOTE_WORKER", "false").lower() in {"1", "true", "yes"}
+    public_origin = os.getenv("FLOWLENS_PUBLIC_ORIGIN", "")
+    auth_configuration = not remote or bool(
+        os.getenv("FLOWLENS_AUTH_HASH_KEY") and public_origin and
+        (not public_origin.startswith("https://") or os.getenv("FLOWLENS_COOKIE_SECURE", "false").lower() in {"1","true","yes"})
+    )
+    return {"status":"ok" if auth_configuration else "degraded","checks":{
         "cdp":{"ok":cdp,"detail":"127.0.0.1:9222","login_state":login_state,"risk_state":risk_state},
         "faster_whisper":{"ok":whisper_installed,"model":"small","device":"cuda" if cuda_devices else "cpu","compute_type":"float16" if cuda_devices else "int8","cuda_devices":cuda_devices},
         "ffprobe":{"ok":ffprobe_path is not None,"path":ffprobe_path,"fallback":"mime_header_sha256" if not ffprobe_path else None},
         "sqlite_fts5":{"ok":fts},
         "media_writable":{"ok":MEDIA.exists() and os.access(MEDIA,os.W_OK)},
         "task_database":{"ok":DB_PATH.parent.exists()},
+        "remote_auth":{"ok":auth_configuration,"detail":"server session + CSRF" if auth_configuration else "配置 FLOWLENS_PUBLIC_ORIGIN、FLOWLENS_AUTH_HASH_KEY 和 HTTPS Secure Cookie"},
     }}

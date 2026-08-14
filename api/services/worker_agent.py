@@ -87,7 +87,10 @@ class WorkerAgent:
         }
 
     def configure_default_handlers(self) -> None:
-        from .douyin_session_manager import session_manager, profile_directory, managed_profile_runtime
+        from .douyin_session_manager import (
+            PlaywrightDouyinLoginBrowser, douyin_browser_slot, managed_profile_runtime,
+            profile_directory, session_manager,
+        )
         from .crawler_manager import crawler_manager
         from ..schemas.crawler import CrawlerStartRequest
 
@@ -146,6 +149,33 @@ class WorkerAgent:
         async def login_cancel(command: WorkerCommand):
             return {"cancelled":await session_manager.cancel_login(str(command.payload.get("login_session_id") or ""))}
 
+        async def session_check(command: WorkerCommand):
+            profile_id = str(command.payload.get("profile_id") or "")
+            connection_id = str(command.payload.get("connection_id") or "")
+            profile = await self.store.get_browser_profile(profile_id)
+            if not profile or profile.get("connection_id") != connection_id:
+                raise ValueError("managed profile does not match connection")
+            browser = PlaywrightDouyinLoginBrowser()
+            try:
+                async with douyin_browser_slot.lock:
+                    await browser.start(profile_directory.ensure(profile["tenant_hash"], profile_id))
+                    state = await browser.check_state()
+                    status = {
+                        "logged_in":"connected", "captcha_required":"verification_required",
+                        "risk_controlled":"risk_controlled",
+                    }.get(state.status, "session_expired")
+                    await self.store.update_connection(
+                        connection_id, status, creator_hash=state.creator_hash,
+                        masked_nickname=state.masked_nickname,
+                    )
+                    return {
+                        "connection_id":connection_id, "connection_status":status,
+                        "creator_hash":state.creator_hash,
+                        "masked_nickname":state.masked_nickname,
+                    }
+            finally:
+                await browser.close()
+
         async def crawl_start(command: WorkerCommand):
             payload = command.payload
             config = dict(payload.get("config") or {})
@@ -198,9 +228,26 @@ class WorkerAgent:
             asyncio.create_task(self._stream_media(command.payload))
             return {"accepted":True, "stream_id":command.payload.get("stream_id")}
 
+        async def media_delete(command: WorkerCommand):
+            asset_id = str(command.payload.get("asset_id") or "")
+            item = await self.store.get_media(asset_id)
+            if not item:
+                return {"asset_id":asset_id, "deleted":False, "status":"not_found"}
+            from .media_relay import safe_media_path
+            deleted_file = False
+            if item.get("path"):
+                path = safe_media_path(item["path"])
+                if path.is_file():
+                    await asyncio.to_thread(path.unlink)
+                    deleted_file = True
+            item.update({"asset_id":asset_id,"status":"deleted","path":None,"size_bytes":0})
+            await self.store.upsert_media(item)
+            return {"asset_id":asset_id,"deleted":True,"deleted_file":deleted_file,"status":"deleted"}
+
         self.register_handler("douyin.login.start",login_start)
         self.register_handler("douyin.login.refresh",login_start)
         self.register_handler("douyin.login.cancel",login_cancel)
+        self.register_handler("douyin.session.check",session_check)
         self.register_handler("crawl.start",crawl_start)
         self.register_handler("crawl.pause",crawl_pause)
         self.register_handler("crawl.resume",crawl_resume)
@@ -209,6 +256,7 @@ class WorkerAgent:
         self.register_handler("profile.delete",profile_delete)
         self.register_handler("profile.close",profile_close)
         self.register_handler("media.open",media_open)
+        self.register_handler("media.delete",media_delete)
 
     async def _stream_media(self, payload: dict[str, Any]) -> None:
         import websockets

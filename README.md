@@ -21,7 +21,7 @@ FlowLens（流镜）以抖音公开数据采集为主要增强方向，支持关
 - 原始响应默认关闭；开启后递归移除可识别个人的信息。
 - 默认关闭代理，仅保留项目已有的静态代理配置。
 - FlowLens 1.1 增加持久任务中心、正式媒体下载、增量采集、定时计划、内容库和系统健康检查。
-- FlowLens 1.2 增加可选的远程 Worker：网站扫码、用户隔离浏览器 Profile、账号绑定采集、断线结果同步与授权媒体中继。
+- FlowLens 1.3 增加管理员创建用户、服务端会话、首次强制改密、多抖音账号与独立 Chrome Profile；远程 Worker、结构化同步和授权媒体中继继续保留。
 
 远程模式默认关闭，部署、网站鉴权边界、Worker 注册和安全注意事项见 [FlowLens 远程 Worker 部署指南](docs/remote-worker.md)。
 
@@ -150,7 +150,7 @@ uv run uvicorn api.main:app --port 8080
 
 浏览器打开 `http://localhost:8080`。
 
-FlowLens 1.2 的 WebUI 使用 `HashRouter`，默认首页是面向网站用户的数据工作台。主要入口为：
+FlowLens 1.3 的 WebUI 使用 `HashRouter`。远程模式先进入 `/#/login`，账号由管理员在 `/#/admin/users` 创建；普通用户首次登录必须在 `/#/change-password` 设置正式密码。主要入口为：
 
 - `/#/connect`：抖音账号连接与扫码状态。
 - `/#/crawl/new`：关键词、话题、视频和账号三步采集向导。

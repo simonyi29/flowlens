@@ -27,5 +27,7 @@ from .system import router as system_router
 from .remote import router as remote_router
 from .worker_gateway import router as worker_gateway_router
 from .dashboard import router as dashboard_router
+from .auth import router as auth_router
+from .admin_users import router as admin_users_router
 
-__all__ = ["crawler_router", "data_router", "websocket_router", "tasks_router", "media_router", "schedules_router", "library_router", "system_router", "remote_router", "worker_gateway_router", "dashboard_router"]
+__all__ = ["crawler_router", "data_router", "websocket_router", "tasks_router", "media_router", "schedules_router", "library_router", "system_router", "remote_router", "worker_gateway_router", "dashboard_router", "auth_router", "admin_users_router"]

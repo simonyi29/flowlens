@@ -27,15 +27,19 @@ import sys
 import subprocess
 from pathlib import Path
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .routers import crawler_router, data_router, websocket_router, tasks_router, media_router, schedules_router, library_router, system_router, remote_router, worker_gateway_router, dashboard_router
+from .routers import crawler_router, data_router, websocket_router, tasks_router, media_router, schedules_router, library_router, system_router, remote_router, worker_gateway_router, dashboard_router, auth_router, admin_users_router
 from .services.task_store import task_store
 from .services.schedule_runner import schedule_runner
 from .services.crawler_manager import crawler_manager
+from .services.auth import remote_mode
+from .services.auth import identity_from_token, SESSION_COOKIE, validate_origin, csrf_token_for_session
+import hmac
 
 # Project root directory (used for running subprocesses like uv run main.py)
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -43,25 +47,83 @@ PROJECT_ROOT = Path(__file__).parent.parent
 app = FastAPI(
     title="FlowLens WebUI API",
     description="API for controlling FlowLens from WebUI",
-    version="1.2.0"
+    version="1.3.0"
 )
 
 # Get webui static files directory
 WEBUI_DIR = os.path.join(os.path.dirname(__file__), "webui")
 
-# CORS configuration - allow frontend dev server access
+# CORS configuration - allow the configured website plus local Vite servers.
+public_origin = os.getenv("FLOWLENS_PUBLIC_ORIGIN", "").rstrip("/")
+cors_origins = [
+    "http://localhost:5173",  # Vite dev server
+    "http://localhost:3000",  # Backup port
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+if public_origin and public_origin not in cors_origins:
+    cors_origins.append(public_origin)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite dev server
-        "http://localhost:3000",  # Backup port
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def remote_browser_auth_boundary(request: Request, call_next):
+    """Prevent legacy local APIs from bypassing website authentication.
+
+    Worker enrollment/control remains on the separate ``/internal`` device
+    authentication surface. Capabilities and login are the only public website
+    endpoints in remote mode.
+    """
+    if not remote_mode() or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    compat = os.getenv("FLOWLENS_TRUSTED_HEADER_COMPAT", "false").lower() in {"1", "true", "yes"}
+    compat_token = request.headers.get("x-flowlens-proxy-token", "")
+    expected_compat_token = os.getenv("FLOWLENS_TRUSTED_PROXY_TOKEN", "")
+    if compat and expected_compat_token and compat_token and hmac.compare_digest(expected_compat_token, compat_token):
+        return await call_next(request)
+    blocked_local_prefixes = ("/api/crawler", "/api/tasks", "/api/library", "/api/media", "/api/data")
+    if request.url.path.startswith(blocked_local_prefixes):
+        return JSONResponse(status_code=404, content={"detail": "local-only API is disabled in remote mode"})
+    public = {
+        "/api/health", "/api/system/capabilities", "/api/auth/login", "/api/auth/register",
+    }
+    if request.url.path in public:
+        return await call_next(request)
+    identity = await identity_from_token(request.cookies.get(SESSION_COOKIE))
+    if identity is None:
+        return JSONResponse(status_code=401, content={"detail": {
+            "error_type": "authentication_required", "user_message": "请先登录 FlowLens。",
+            "recoverable": True, "recommended_action": "login",
+        }})
+    auth_allowed = {"/api/auth/me", "/api/auth/change-password", "/api/auth/logout"}
+    if (identity.must_change_password or identity.status == "pending_activation") and request.url.path not in auth_allowed:
+        return JSONResponse(status_code=403, content={"detail": {
+            "error_type": "password_change_required", "user_message": "首次登录需要先设置正式密码。",
+            "recoverable": True, "recommended_action": "change_password",
+        }})
+    if identity.status == "suspended":
+        return JSONResponse(status_code=423, content={"detail": {
+            "error_type": "account_suspended", "user_message": "账号已暂停，请联系管理员。",
+        }})
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/api/auth/login":
+        try:
+            validate_origin(request)
+        except Exception:
+            return JSONResponse(status_code=403, content={"detail": {"error_type": "invalid_origin", "user_message": "请求来源未被允许。"}})
+        provided = request.headers.get("x-csrf-token", "")
+        expected = csrf_token_for_session(identity.session_token or "")
+        if not provided or not hmac.compare_digest(provided, expected):
+            return JSONResponse(status_code=403, content={"detail": {
+                "error_type": "csrf_failed", "user_message": "安全令牌已失效，请刷新页面后重试。",
+            }})
+    request.state.identity = identity
+    return await call_next(request)
 
 # Register routers
 app.include_router(crawler_router, prefix="/api")
@@ -72,6 +134,8 @@ app.include_router(media_router, prefix="/api")
 app.include_router(schedules_router, prefix="/api")
 app.include_router(library_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
+app.include_router(admin_users_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(remote_router, prefix="/api")
 app.include_router(worker_gateway_router)
@@ -80,8 +144,22 @@ app.include_router(worker_gateway_router)
 @app.on_event("startup")
 async def initialize_task_store():
     await task_store.initialize()
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    await task_store.cleanup_auth_records((now - timedelta(days=30)).isoformat())
+    await task_store.cleanup_expired_sessions(now.isoformat())
     await crawler_manager.start_next_queued()
     schedule_runner.start()
+    if remote_mode():
+        problems = []
+        if not os.getenv("FLOWLENS_AUTH_HASH_KEY"):
+            problems.append("FLOWLENS_AUTH_HASH_KEY is not configured")
+        if not os.getenv("FLOWLENS_PUBLIC_ORIGIN"):
+            problems.append("FLOWLENS_PUBLIC_ORIGIN is not configured")
+        if os.getenv("FLOWLENS_PUBLIC_ORIGIN", "").startswith("https://") and os.getenv("FLOWLENS_COOKIE_SECURE", "false").lower() not in {"1", "true", "yes"}:
+            problems.append("FLOWLENS_COOKIE_SECURE must be true for HTTPS")
+        if problems:
+            print("[FlowLens auth health] " + "; ".join(problems))
 
 
 @app.on_event("shutdown")
@@ -97,7 +175,7 @@ async def serve_frontend():
         return FileResponse(index_path)
     return {
         "message": "FlowLens WebUI API",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "docs": "/docs",
         "note": "WebUI not found, please build it first: cd webui && npm run build"
     }

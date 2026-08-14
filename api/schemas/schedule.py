@@ -17,6 +17,7 @@ class ScheduleRequest(BaseModel):
     timezone: str = "Asia/Shanghai"
     config: dict[str, Any] = Field(default_factory=dict)
     next_run_at: datetime | None = None
+    connection_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def validate_schedule(self):

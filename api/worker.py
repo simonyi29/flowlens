@@ -72,7 +72,7 @@ async def run_agent(config_path: Path = WORKER_CONFIG) -> None:
     public_key = identity.load_or_create()
     await task_store.upsert_worker({
         "worker_id":str(config["worker_id"]), "name":str(config.get("name") or "flowlens-worker"),
-        "public_key":public_key, "status":"online", "version":"1.2.0",
+        "public_key":public_key, "status":"online", "version":"1.3.0",
         "protocol_version":str(config.get("protocol_version") or "1.0"),
     })
     agent = WorkerAgent(str(config["worker_id"]), identity=identity)

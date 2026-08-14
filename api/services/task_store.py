@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = ROOT / "data" / "flowlens" / "tasks.sqlite"
+_configured_db_path = os.getenv("FLOWLENS_TASK_DB_PATH", "").strip()
+DB_PATH = Path(_configured_db_path or ROOT / "data" / "flowlens" / "tasks.sqlite").resolve()
 
 
 def _now() -> str:
@@ -126,11 +127,51 @@ class TaskStore:
               capabilities_json TEXT NOT NULL DEFAULT '{}', browser_slots INTEGER NOT NULL DEFAULT 1,
               last_heartbeat_at TEXT, registered_at TEXT NOT NULL, revoked_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS flowlens_user (
+              user_id TEXT PRIMARY KEY, username TEXT NOT NULL,
+              normalized_username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL,
+              password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','user')),
+              status TEXT NOT NULL CHECK(status IN ('pending_activation','active','suspended')),
+              must_change_password INTEGER NOT NULL DEFAULT 1,
+              temporary_password_expires_at TEXT,
+              max_douyin_connections INTEGER NOT NULL DEFAULT 3,
+              max_queued_tasks INTEGER NOT NULL DEFAULT 10,
+              media_quota_bytes INTEGER NOT NULL DEFAULT 21474836480,
+              created_by_user_id TEXT, created_at TEXT NOT NULL, activated_at TEXT,
+              last_login_at TEXT, suspended_at TEXT, updated_at TEXT NOT NULL,
+              FOREIGN KEY(created_by_user_id) REFERENCES flowlens_user(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_flowlens_user_status ON flowlens_user(status, created_at);
+            CREATE TABLE IF NOT EXISTS user_session (
+              session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+              session_token_hash TEXT NOT NULL UNIQUE, csrf_token_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+              idle_expires_at TEXT NOT NULL, absolute_expires_at TEXT NOT NULL,
+              revoked_at TEXT, revoked_reason TEXT,
+              FOREIGN KEY(user_id) REFERENCES flowlens_user(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_user_session_user ON user_session(user_id, revoked_at);
+            CREATE TABLE IF NOT EXISTS auth_login_attempt (
+              attempt_id TEXT PRIMARY KEY, username_hash TEXT NOT NULL,
+              source_ip_hash TEXT NOT NULL, success INTEGER NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_auth_attempt_username ON auth_login_attempt(username_hash, created_at);
+            CREATE INDEX IF NOT EXISTS ix_auth_attempt_ip ON auth_login_attempt(source_ip_hash, created_at);
+            CREATE TABLE IF NOT EXISTS audit_event (
+              audit_id TEXT PRIMARY KEY, actor_user_id TEXT, action TEXT NOT NULL,
+              target_type TEXT NOT NULL, target_id TEXT, result TEXT NOT NULL,
+              sanitized_context_json TEXT NOT NULL DEFAULT '{}', request_id TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(actor_user_id) REFERENCES flowlens_user(user_id)
+            );
+            CREATE INDEX IF NOT EXISTS ix_audit_actor ON audit_event(actor_user_id, created_at);
             CREATE TABLE IF NOT EXISTS douyin_connection (
               connection_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, worker_id TEXT NOT NULL,
               profile_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL, creator_hash TEXT,
               masked_nickname TEXT, last_verified_at TEXT, created_at TEXT NOT NULL,
-              disconnected_at TEXT, FOREIGN KEY(worker_id) REFERENCES flowlens_worker(worker_id)
+              disconnected_at TEXT, display_name TEXT, remark TEXT, updated_at TEXT,
+              FOREIGN KEY(worker_id) REFERENCES flowlens_worker(worker_id)
             );
             CREATE INDEX IF NOT EXISTS ix_connection_user ON douyin_connection(user_id, created_at);
             CREATE TABLE IF NOT EXISTS remote_crawl_run (
@@ -171,6 +212,10 @@ class TaskStore:
             """)
             self._ensure_columns(db, "login_session", {"user_id":"TEXT", "worker_id":"TEXT"})
             self._ensure_columns(db, "sync_outbox", {"worker_id":"TEXT"})
+            self._ensure_columns(db, "douyin_connection", {
+                "display_name": "TEXT", "remark": "TEXT", "updated_at": "TEXT"
+            })
+            self._ensure_columns(db, "schedule", {"user_id": "TEXT", "connection_id": "TEXT"})
             db.execute("UPDATE crawl_run SET status='partial', finished_at=? WHERE status IN ('running','pausing')", (_now(),))
             # Older direct CLI runs recorded an interrupted process as both
             # ``partial`` and ``error_type=cancelled``.  That made the product
@@ -200,6 +245,8 @@ class TaskStore:
             db.execute("UPDATE browser_profile SET status='idle',pid=NULL,cdp_port=NULL,updated_at=? WHERE status='running'", (_now(),))
             db.execute("UPDATE login_session SET status='failed',error_type='worker_restarted',error_message='Worker restarted before login completed',updated_at=? WHERE status IN ('starting_browser','opening_login_page','generating_qr','qr_ready','qr_scanned','checking_login')", (_now(),))
             db.execute("INSERT OR IGNORE INTO task_schema_migrations(version,applied_at) VALUES('remote_worker_v1',?)", (_now(),))
+            db.execute("INSERT OR IGNORE INTO task_schema_migrations(version,applied_at) VALUES('auth_accounts_v1',?)", (_now(),))
+            self._migrate_legacy_users_sync(db)
 
     @staticmethod
     def _ensure_columns(db: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -207,6 +254,30 @@ class TaskStore:
         for name, declaration in columns.items():
             if name not in existing:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+
+    @staticmethod
+    def _migrate_legacy_users_sync(db: sqlite3.Connection) -> None:
+        """Keep old tenant ownership intact without making legacy IDs loginable."""
+        user_ids: set[str] = set()
+        for table in ("douyin_connection", "remote_crawl_run", "remote_result"):
+            user_ids.update(
+                str(row[0]) for row in db.execute(
+                    f"SELECT DISTINCT user_id FROM {table} WHERE user_id IS NOT NULL AND user_id<>''"
+                )
+            )
+        now = _now()
+        for user_id in user_ids:
+            if db.execute("SELECT 1 FROM flowlens_user WHERE user_id=?", (user_id,)).fetchone():
+                continue
+            suffix = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
+            username = f"legacy_{suffix}"
+            db.execute(
+                """INSERT INTO flowlens_user(
+                   user_id,username,normalized_username,display_name,password_hash,role,status,
+                   must_change_password,created_at,suspended_at,updated_at
+                   ) VALUES(?,?,?,?,?,'user','suspended',1,?,?,?)""",
+                (user_id, username, username, "旧版迁移用户", "!disabled!", now, now, now),
+            )
 
     async def create_run(self, config: dict[str, Any]) -> str:
         run_id = uuid.uuid4().hex
@@ -746,15 +817,346 @@ class TaskStore:
             )
             return bool(cursor.rowcount)
 
+    # Website account and server-side session persistence -----------------
+
+    async def admin_exists(self) -> bool:
+        rows = await asyncio.to_thread(
+            self._query, "SELECT 1 FROM flowlens_user WHERE role='admin' LIMIT 1"
+        )
+        return bool(rows)
+
+    async def create_user(self, item: dict[str, Any]) -> dict[str, Any]:
+        user_id = item.get("user_id") or uuid.uuid4().hex
+        now = _now()
+        values = (
+            user_id, item["username"], item["normalized_username"], item["display_name"],
+            item["password_hash"], item.get("role", "user"),
+            item.get("status", "pending_activation"), int(item.get("must_change_password", True)),
+            item.get("temporary_password_expires_at"), int(item.get("max_douyin_connections", 3)),
+            int(item.get("max_queued_tasks", 10)), int(item.get("media_quota_bytes", 21474836480)),
+            item.get("created_by_user_id"), now, now,
+        )
+        sql = """INSERT INTO flowlens_user(
+        user_id,username,normalized_username,display_name,password_hash,role,status,
+        must_change_password,temporary_password_expires_at,max_douyin_connections,
+        max_queued_tasks,media_quota_bytes,created_by_user_id,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+        async with self._lock:
+            await asyncio.to_thread(self._execute, sql, values)
+        return await self.get_user(user_id)
+
+    async def get_user(self, user_id: str) -> dict[str, Any] | None:
+        rows = await asyncio.to_thread(
+            self._query, "SELECT * FROM flowlens_user WHERE user_id=?", (user_id,)
+        )
+        return rows[0] if rows else None
+
+    async def get_user_by_username(self, normalized_username: str) -> dict[str, Any] | None:
+        rows = await asyncio.to_thread(
+            self._query,
+            "SELECT * FROM flowlens_user WHERE normalized_username=?",
+            (normalized_username,),
+        )
+        return rows[0] if rows else None
+
+    async def list_users(
+        self, *, search: str | None = None, status: str | None = None,
+        limit: int = 50, offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if search:
+            clauses.append("(normalized_username LIKE ? OR display_name LIKE ?)")
+            term = f"%{search.lower()}%"
+            args.extend((term, term))
+        if status:
+            clauses.append("status=?")
+            args.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"""SELECT u.user_id,u.username,u.display_name,u.role,u.status,
+        u.must_change_password,u.max_douyin_connections,u.max_queued_tasks,u.media_quota_bytes,
+        u.created_at,u.last_login_at,u.suspended_at,
+        (SELECT COUNT(*) FROM douyin_connection c WHERE c.user_id=u.user_id AND c.status<>'disconnected') AS douyin_connection_count,
+        (SELECT COUNT(*) FROM remote_crawl_run r WHERE r.user_id=u.user_id AND r.status IN ('queued','running','pausing','paused','waiting_for_login','waiting_for_space')) AS active_task_count,
+        COALESCE((SELECT SUM(CASE WHEN json_valid(e.payload_json) THEN json_extract(e.payload_json,'$.size_bytes') ELSE 0 END)
+          FROM remote_entity e WHERE e.user_id=u.user_id AND e.entity_type='media'
+          AND COALESCE(json_extract(e.payload_json,'$.status'),'')<>'deleted'),0) AS media_usage_bytes
+        FROM flowlens_user u {where} ORDER BY u.created_at DESC LIMIT ? OFFSET ?"""
+        args.extend((limit, offset))
+        return await asyncio.to_thread(self._query, sql, tuple(args))
+
+    async def get_user_resource_summary(self, user_id: str) -> dict[str, Any] | None:
+        rows = await asyncio.to_thread(
+            self._query,
+            """SELECT u.user_id,u.username,u.display_name,u.role,u.status,
+            u.must_change_password,u.max_douyin_connections,u.max_queued_tasks,u.media_quota_bytes,
+            u.created_at,u.activated_at,u.last_login_at,u.suspended_at,u.updated_at,
+            (SELECT COUNT(*) FROM douyin_connection c WHERE c.user_id=u.user_id AND c.status<>'disconnected') AS douyin_connection_count,
+            (SELECT COUNT(*) FROM remote_crawl_run r WHERE r.user_id=u.user_id AND r.status IN ('queued','running','pausing','paused','waiting_for_login','waiting_for_space')) AS active_task_count,
+            COALESCE((SELECT SUM(CASE WHEN json_valid(e.payload_json) THEN json_extract(e.payload_json,'$.size_bytes') ELSE 0 END)
+              FROM remote_entity e WHERE e.user_id=u.user_id AND e.entity_type='media'
+              AND COALESCE(json_extract(e.payload_json,'$.status'),'')<>'deleted'),0) AS media_usage_bytes
+            FROM flowlens_user u WHERE u.user_id=? LIMIT 1""",
+            (user_id,),
+        )
+        return rows[0] if rows else None
+
+    async def count_users(self, *, search: str | None = None, status: str | None = None) -> int:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if search:
+            clauses.append("(normalized_username LIKE ? OR display_name LIKE ?)")
+            term = f"%{search.lower()}%"
+            args.extend((term, term))
+        if status:
+            clauses.append("status=?")
+            args.append(status)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = await asyncio.to_thread(
+            self._query, f"SELECT COUNT(*) AS total FROM flowlens_user{where}", tuple(args)
+        )
+        return int(rows[0]["total"] if rows else 0)
+
+    async def update_user_profile(
+        self, user_id: str, *, display_name: str | None = None,
+        username: str | None = None, normalized_username: str | None = None,
+        max_douyin_connections: int | None = None, max_queued_tasks: int | None = None,
+        media_quota_bytes: int | None = None,
+    ) -> dict[str, Any] | None:
+        fields = ["updated_at=?"]
+        values: list[Any] = [_now()]
+        for field, value in (
+            ("display_name", display_name), ("username", username),
+            ("normalized_username", normalized_username),
+            ("max_douyin_connections", max_douyin_connections),
+            ("max_queued_tasks", max_queued_tasks), ("media_quota_bytes", media_quota_bytes),
+        ):
+            if value is not None:
+                fields.append(f"{field}=?")
+                values.append(value)
+        values.append(user_id)
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute, f"UPDATE flowlens_user SET {','.join(fields)} WHERE user_id=?", values
+            )
+        return await self.get_user(user_id)
+
+    async def set_user_password(
+        self, user_id: str, password_hash: str, *, temporary_expires_at: str | None,
+        must_change_password: bool, activate: bool = False,
+    ) -> None:
+        now = _now()
+        status_sql = ",status='active',activated_at=COALESCE(activated_at,?)" if activate else ""
+        args: list[Any] = [
+            password_hash, int(must_change_password), temporary_expires_at, now,
+        ]
+        if activate:
+            args.append(now)
+        args.append(user_id)
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE flowlens_user SET password_hash=?,must_change_password=?,"
+                f"temporary_password_expires_at=?,updated_at=?{status_sql} WHERE user_id=?",
+                args,
+            )
+
+    async def set_user_status(self, user_id: str, status: str) -> None:
+        now = _now()
+        suspended_at = now if status == "suspended" else None
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE flowlens_user SET status=?,suspended_at=?,updated_at=? WHERE user_id=?",
+                (status, suspended_at, now, user_id),
+            )
+
+    async def record_login(self, user_id: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute, "UPDATE flowlens_user SET last_login_at=?,updated_at=? WHERE user_id=?",
+                (_now(), _now(), user_id),
+            )
+
+    async def consume_temporary_password(self, user_id: str) -> None:
+        """Make the temporary credential unusable after its first successful login."""
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE flowlens_user SET temporary_password_expires_at=NULL,updated_at=? WHERE user_id=? AND must_change_password=1",
+                (_now(), user_id),
+            )
+
+    async def create_user_session(self, item: dict[str, Any]) -> None:
+        sql = """INSERT INTO user_session(
+        session_id,user_id,session_token_hash,csrf_token_hash,created_at,last_seen_at,
+        idle_expires_at,absolute_expires_at) VALUES(?,?,?,?,?,?,?,?)"""
+        values = (
+            item["session_id"], item["user_id"], item["session_token_hash"],
+            item["csrf_token_hash"], item["created_at"], item["last_seen_at"],
+            item["idle_expires_at"], item["absolute_expires_at"],
+        )
+        async with self._lock:
+            await asyncio.to_thread(self._execute, sql, values)
+
+    async def get_user_session(self, token_hash: str) -> dict[str, Any] | None:
+        rows = await asyncio.to_thread(
+            self._query,
+            """SELECT s.*,u.username,u.normalized_username,u.display_name,u.role,u.status,
+            u.must_change_password,u.temporary_password_expires_at,u.max_douyin_connections,
+            u.max_queued_tasks,u.media_quota_bytes
+            FROM user_session s JOIN flowlens_user u ON u.user_id=s.user_id
+            WHERE s.session_token_hash=?""",
+            (token_hash,),
+        )
+        return rows[0] if rows else None
+
+    async def touch_user_session(self, session_id: str, last_seen_at: str, idle_expires_at: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE user_session SET last_seen_at=?,idle_expires_at=? WHERE session_id=? AND revoked_at IS NULL",
+                (last_seen_at, idle_expires_at, session_id),
+            )
+
+    async def revoke_user_sessions(
+        self, user_id: str, reason: str, *, except_session_id: str | None = None,
+    ) -> int:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._revoke_user_sessions_sync, user_id, reason, except_session_id
+            )
+
+    def _revoke_user_sessions_sync(
+        self, user_id: str, reason: str, except_session_id: str | None,
+    ) -> int:
+        with self._connect() as db:
+            sql = "UPDATE user_session SET revoked_at=?,revoked_reason=? WHERE user_id=? AND revoked_at IS NULL"
+            args: list[Any] = [_now(), reason, user_id]
+            if except_session_id:
+                sql += " AND session_id<>?"
+                args.append(except_session_id)
+            cursor = db.execute(sql, args)
+            return int(cursor.rowcount or 0)
+
+    async def revoke_session(self, session_id: str, reason: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "UPDATE user_session SET revoked_at=?,revoked_reason=? WHERE session_id=? AND revoked_at IS NULL",
+                (_now(), reason, session_id),
+            )
+
+    async def record_login_attempt(
+        self, username_hash: str, source_ip_hash: str, success: bool,
+    ) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "INSERT INTO auth_login_attempt(attempt_id,username_hash,source_ip_hash,success,created_at) VALUES(?,?,?,?,?)",
+                (uuid.uuid4().hex, username_hash, source_ip_hash, int(success), _now()),
+            )
+
+    async def recent_login_attempts(self, username_hash: str, source_ip_hash: str, since: str):
+        return await asyncio.to_thread(
+            self._query,
+            """SELECT username_hash,source_ip_hash,success,created_at FROM auth_login_attempt
+            WHERE created_at>=? AND (username_hash=? OR source_ip_hash=?) ORDER BY created_at DESC""",
+            (since, username_hash, source_ip_hash),
+        )
+
+    async def cleanup_auth_records(self, before: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute, "DELETE FROM auth_login_attempt WHERE created_at<?", (before,)
+            )
+
+    async def cleanup_expired_sessions(self, now: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                "DELETE FROM user_session WHERE (revoked_at IS NOT NULL OR absolute_expires_at<?) AND created_at<?",
+                (now, now),
+            )
+
+    async def add_audit_event(
+        self, *, actor_user_id: str | None, action: str, target_type: str,
+        target_id: str | None, result: str = "success",
+        context: dict[str, Any] | None = None, request_id: str | None = None,
+    ) -> None:
+        safe_context = context or {}
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                """INSERT INTO audit_event(audit_id,actor_user_id,action,target_type,target_id,
+                result,sanitized_context_json,request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (uuid.uuid4().hex, actor_user_id, action, target_type, target_id, result,
+                 json.dumps(safe_context, ensure_ascii=False), request_id, _now()),
+            )
+
+    async def count_active_connections(self, user_id: str) -> int:
+        rows = await asyncio.to_thread(
+            self._query,
+            "SELECT COUNT(*) AS total FROM douyin_connection WHERE user_id=? AND status<>'disconnected'",
+            (user_id,),
+        )
+        return int(rows[0]["total"] if rows else 0)
+
+    async def count_active_remote_runs(self, user_id: str) -> int:
+        rows = await asyncio.to_thread(
+            self._query,
+            """SELECT COUNT(*) AS total FROM remote_crawl_run WHERE user_id=?
+            AND status IN ('queued','running','pausing','paused','waiting_for_login','waiting_for_space')""",
+            (user_id,),
+        )
+        return int(rows[0]["total"] if rows else 0)
+
+    async def reserved_user_media_bytes(self, user_id: str) -> int:
+        """Return media bytes promised to unfinished remote runs.
+
+        The reservation prevents a user from queuing several downloads that each
+        individually fit the quota but exceed it in aggregate. Actual completed
+        media usage is accounted separately from remote entities.
+        """
+        rows = await asyncio.to_thread(
+            self._query,
+            """SELECT sanitized_config_json FROM remote_crawl_run WHERE user_id=?
+            AND status IN ('queued','running','pausing','paused','waiting_for_login','waiting_for_space')""",
+            (user_id,),
+        )
+        reserved = 0
+        for row in rows:
+            try:
+                config = json.loads(row.get("sanitized_config_json") or "{}")
+            except (TypeError, ValueError):
+                continue
+            if config.get("download_media"):
+                reserved += max(0, int(config.get("max_media_total_bytes") or 0))
+        return reserved
+
+    async def pause_user_remote_runs(self, user_id: str) -> int:
+        async with self._lock:
+            return await asyncio.to_thread(self._pause_user_remote_runs_sync, user_id)
+
+    def _pause_user_remote_runs_sync(self, user_id: str) -> int:
+        with self._connect() as db:
+            cursor = db.execute(
+                """UPDATE remote_crawl_run SET status='paused',error_type='account_suspended',
+                error_message='账号已被管理员暂停' WHERE user_id=?
+                AND status IN ('queued','running','pausing','waiting_for_login','waiting_for_space')""",
+                (user_id,),
+            )
+            return int(cursor.rowcount or 0)
+
     async def save_connection(self, item: dict[str, Any]) -> None:
-        sql = """INSERT INTO douyin_connection(connection_id,user_id,worker_id,profile_id,status,creator_hash,masked_nickname,last_verified_at,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id) DO UPDATE SET
+        sql = """INSERT INTO douyin_connection(connection_id,user_id,worker_id,profile_id,status,creator_hash,masked_nickname,last_verified_at,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id) DO UPDATE SET
         status=excluded.status,creator_hash=excluded.creator_hash,masked_nickname=excluded.masked_nickname,
-        last_verified_at=excluded.last_verified_at"""
+        last_verified_at=excluded.last_verified_at,updated_at=excluded.updated_at"""
         values = (
             item["connection_id"], item["user_id"], item["worker_id"], item["profile_id"],
             item.get("status", "creating"), item.get("creator_hash"), item.get("masked_nickname"),
-            item.get("last_verified_at"), item.get("created_at", _now()),
+            item.get("last_verified_at"), item.get("created_at", _now()), item.get("updated_at", _now()),
         )
         async with self._lock:
             await asyncio.to_thread(self._execute, sql, values)
@@ -762,8 +1164,22 @@ class TaskStore:
     async def list_user_connections(self, user_id: str):
         return await asyncio.to_thread(
             self._query,
-            "SELECT connection_id,worker_id,status,creator_hash,masked_nickname,last_verified_at,created_at FROM douyin_connection WHERE user_id=? ORDER BY created_at DESC",
+            "SELECT connection_id,worker_id,status,creator_hash,masked_nickname,display_name,remark,last_verified_at,created_at,updated_at FROM douyin_connection WHERE user_id=? ORDER BY created_at DESC",
             (user_id,),
+        )
+
+    async def list_connections_requiring_verification(self, limit: int = 100):
+        return await asyncio.to_thread(
+            self._query,
+            """SELECT c.connection_id,c.worker_id,c.status,c.masked_nickname,c.display_name,
+            c.remark,c.last_verified_at,c.updated_at,u.display_name AS user_display_name,
+            w.name AS worker_name,w.status AS worker_status
+            FROM douyin_connection c
+            LEFT JOIN flowlens_user u ON u.user_id=c.user_id
+            LEFT JOIN flowlens_worker w ON w.worker_id=c.worker_id
+            WHERE c.status IN ('verification_required','risk_controlled')
+            ORDER BY c.updated_at ASC LIMIT ?""",
+            (min(max(limit, 1), 200),),
         )
 
     async def get_connection(self, connection_id: str):
@@ -780,8 +1196,27 @@ class TaskStore:
         async with self._lock:
             await asyncio.to_thread(
                 self._execute,
-                "UPDATE douyin_connection SET status=?,creator_hash=COALESCE(?,creator_hash),masked_nickname=COALESCE(?,masked_nickname),last_verified_at=COALESCE(?,last_verified_at) WHERE connection_id=?",
-                (status, creator_hash, masked_nickname, verified, connection_id),
+                "UPDATE douyin_connection SET status=?,creator_hash=COALESCE(?,creator_hash),masked_nickname=COALESCE(?,masked_nickname),last_verified_at=COALESCE(?,last_verified_at),updated_at=? WHERE connection_id=?",
+                (status, creator_hash, masked_nickname, verified, _now(), connection_id),
+            )
+
+    async def update_connection_labels(
+        self, connection_id: str, *, display_name: str | None, remark: str | None,
+    ) -> None:
+        fields = ["updated_at=?"]
+        values: list[Any] = [_now()]
+        if display_name is not None:
+            fields.append("display_name=?")
+            values.append(display_name)
+        if remark is not None:
+            fields.append("remark=?")
+            values.append(remark)
+        values.append(connection_id)
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute,
+                f"UPDATE douyin_connection SET {','.join(fields)} WHERE connection_id=?",
+                values,
             )
 
     async def create_remote_run(self, item: dict[str, Any]) -> str:
@@ -839,26 +1274,35 @@ class TaskStore:
         limit: int = 100,
         offset: int = 0,
         status: str | None = None,
+        connection_id: str | None = None,
     ):
+        clauses = ["user_id=?"]
+        args: list[Any] = [user_id]
         if status:
-            return await asyncio.to_thread(
-                self._query,
-                "SELECT * FROM remote_crawl_run WHERE user_id=? AND status=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (user_id, status, limit, offset),
-            )
+            clauses.append("status=?")
+            args.append(status)
+        if connection_id:
+            clauses.append("connection_id=?")
+            args.append(connection_id)
+        args.extend((limit, offset))
         return await asyncio.to_thread(
             self._query,
-            "SELECT * FROM remote_crawl_run WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (user_id, limit, offset),
+            f"SELECT * FROM remote_crawl_run WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            tuple(args),
         )
 
-    async def count_user_remote_runs(self, user_id: str, status: str | None = None) -> int:
+    async def count_user_remote_runs(
+        self, user_id: str, status: str | None = None, connection_id: str | None = None,
+    ) -> int:
         sql = "SELECT COUNT(*) AS total FROM remote_crawl_run WHERE user_id=?"
-        args: tuple[Any, ...] = (user_id,)
+        args: list[Any] = [user_id]
         if status:
             sql += " AND status=?"
-            args = (user_id, status)
-        rows = await asyncio.to_thread(self._query, sql, args)
+            args.append(status)
+        if connection_id:
+            sql += " AND connection_id=?"
+            args.append(connection_id)
+        rows = await asyncio.to_thread(self._query, sql, tuple(args))
         return int(rows[0]["total"] if rows else 0)
 
     async def user_remote_run_status_counts(self, user_id: str) -> dict[str, int]:
@@ -868,6 +1312,25 @@ class TaskStore:
             (user_id,),
         )
         return {str(row["status"]): int(row["total"]) for row in rows}
+
+    async def list_remote_runs_global(self, limit: int = 100, offset: int = 0):
+        return await asyncio.to_thread(
+            self._query,
+            """SELECT r.run_id,r.stage,r.status,r.created_at,r.sanitized_config_json,
+            u.display_name AS user_display_name,c.display_name,c.remark,c.masked_nickname,
+            w.name AS worker_name,
+            COALESCE(json_extract(r.sanitized_config_json,'$.crawler_type'),'unknown') AS crawler_type
+            FROM remote_crawl_run r
+            LEFT JOIN flowlens_user u ON u.user_id=r.user_id
+            LEFT JOIN douyin_connection c ON c.connection_id=r.connection_id
+            LEFT JOIN flowlens_worker w ON w.worker_id=r.worker_id
+            ORDER BY r.created_at DESC LIMIT ? OFFSET ?""",
+            (limit, offset),
+        )
+
+    async def count_remote_runs_global(self) -> int:
+        rows = await asyncio.to_thread(self._query, "SELECT COUNT(*) AS total FROM remote_crawl_run")
+        return int(rows[0]["total"] if rows else 0)
 
     async def update_remote_run(self, run_id: str, status: str, *, stage: str | None = None,
                                 error_type: str | None = None, error_message: str | None = None,
@@ -909,20 +1372,32 @@ class TaskStore:
                 )
             return bool(cursor.rowcount)
 
-    async def list_user_remote_results(self, user_id: str, entity_type: str, limit: int = 50, offset: int = 0):
+    async def list_user_remote_results(
+        self, user_id: str, entity_type: str, limit: int = 50, offset: int = 0,
+        connection_id: str | None = None,
+    ):
         table = "remote_result" if entity_type in {"aweme_metric", "creator_metric", "log"} else "remote_entity"
+        connection_clause = " AND connection_id=?" if connection_id else ""
+        args: tuple[Any, ...] = (
+            (user_id, entity_type, connection_id, limit, offset) if connection_id
+            else (user_id, entity_type, limit, offset)
+        )
         return await asyncio.to_thread(
             self._query,
-            f"SELECT source_event_id,run_id,entity_type,entity_id,payload_json,observed_at,synced_at FROM {table} WHERE user_id=? AND entity_type=? ORDER BY synced_at DESC LIMIT ? OFFSET ?",
-            (user_id,entity_type,limit,offset),
+            f"SELECT source_event_id,connection_id,run_id,entity_type,entity_id,payload_json,observed_at,synced_at FROM {table} WHERE user_id=? AND entity_type=?{connection_clause} ORDER BY synced_at DESC LIMIT ? OFFSET ?",
+            args,
         )
 
-    async def count_user_remote_results(self, user_id: str, entity_type: str) -> int:
+    async def count_user_remote_results(
+        self, user_id: str, entity_type: str, connection_id: str | None = None,
+    ) -> int:
         table = "remote_result" if entity_type in {"aweme_metric", "creator_metric", "log"} else "remote_entity"
+        connection_clause = " AND connection_id=?" if connection_id else ""
+        args = (user_id, entity_type, connection_id) if connection_id else (user_id, entity_type)
         rows = await asyncio.to_thread(
             self._query,
-            f"SELECT COUNT(*) AS total FROM {table} WHERE user_id=? AND entity_type=?",
-            (user_id, entity_type),
+            f"SELECT COUNT(*) AS total FROM {table} WHERE user_id=? AND entity_type=?{connection_clause}",
+            args,
         )
         return int(rows[0]["total"] if rows else 0)
 
@@ -963,6 +1438,42 @@ class TaskStore:
         )
         return rows[0] if rows else None
 
+    async def update_remote_media_status(
+        self, asset_id: str, worker_id: str, status: str, *,
+        user_id: str | None = None, deleted: bool = False,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._update_remote_media_status_sync, asset_id, worker_id, status, user_id, deleted
+            )
+
+    def _update_remote_media_status_sync(
+        self, asset_id: str, worker_id: str, status: str,
+        user_id: str | None, deleted: bool,
+    ) -> bool:
+        with self._connect() as db:
+            user_clause = " AND user_id=?" if user_id else ""
+            args: tuple[Any, ...] = (asset_id, worker_id, user_id) if user_id else (asset_id, worker_id)
+            row = db.execute(
+                f"SELECT * FROM remote_entity WHERE entity_type='media' AND entity_id=? AND worker_id=?{user_clause}",
+                args,
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            payload["status"] = status
+            if deleted:
+                payload.update({"size_bytes":0,"deleted_at":_now()})
+            rendered = json.dumps(payload, ensure_ascii=False)
+            db.execute(
+                "UPDATE remote_entity SET payload_json=?,synced_at=? WHERE user_id=? AND entity_type='media' AND entity_id=?",
+                (rendered, _now(), row["user_id"], asset_id),
+            )
+            return True
+
     async def save_schedule(self, item: dict[str, Any], schedule_id: str | None = None) -> str:
         schedule_id = schedule_id or uuid.uuid4().hex
         now = _now()
@@ -972,24 +1483,43 @@ class TaskStore:
         values = (schedule_id, item["name"], int(item.get("enabled", True)), item["platform"],
                   item["crawler_type"], item["source"], item["interval_type"], int(item.get("interval_value", 1)),
                   item.get("run_at"), item.get("timezone", "Asia/Shanghai"), json.dumps(safe_config, ensure_ascii=False),
-                  item.get("last_run_at"), item.get("next_run_at"), "run_once", now, now)
+                  item.get("last_run_at"), item.get("next_run_at"), "run_once", now, now,
+                  item.get("user_id"), item.get("connection_id"))
         sql = """INSERT INTO schedule(schedule_id,name,enabled,platform,crawler_type,source,interval_type,interval_value,
-        run_at,timezone,config_json,last_run_at,next_run_at,misfire_policy,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        run_at,timezone,config_json,last_run_at,next_run_at,misfire_policy,created_at,updated_at,user_id,connection_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(schedule_id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,source=excluded.source,
         interval_type=excluded.interval_type,interval_value=excluded.interval_value,run_at=excluded.run_at,
-        timezone=excluded.timezone,config_json=excluded.config_json,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at"""
+        timezone=excluded.timezone,config_json=excluded.config_json,next_run_at=excluded.next_run_at,
+        user_id=COALESCE(excluded.user_id,schedule.user_id),connection_id=COALESCE(excluded.connection_id,schedule.connection_id),updated_at=excluded.updated_at"""
         async with self._lock: await asyncio.to_thread(self._execute, sql, values)
         return schedule_id
 
     async def list_schedules(self):
         return await asyncio.to_thread(self._query, "SELECT * FROM schedule ORDER BY created_at DESC")
 
+    async def list_user_schedules(self, user_id: str):
+        return await asyncio.to_thread(
+            self._query, "SELECT * FROM schedule WHERE user_id=? ORDER BY created_at DESC", (user_id,)
+        )
+
     async def get_schedule(self, schedule_id):
         rows = await asyncio.to_thread(self._query, "SELECT * FROM schedule WHERE schedule_id=?", (schedule_id,))
         return rows[0] if rows else None
 
+    async def get_user_schedule(self, schedule_id: str, user_id: str):
+        rows = await asyncio.to_thread(
+            self._query, "SELECT * FROM schedule WHERE schedule_id=? AND user_id=?", (schedule_id, user_id)
+        )
+        return rows[0] if rows else None
+
     async def delete_schedule(self, schedule_id):
         async with self._lock: await asyncio.to_thread(self._execute, "DELETE FROM schedule WHERE schedule_id=?", (schedule_id,))
+
+    async def delete_user_schedule(self, schedule_id: str, user_id: str):
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute, "DELETE FROM schedule WHERE schedule_id=? AND user_id=?", (schedule_id, user_id)
+            )
 
     async def due_schedules(self, now: str):
         return await asyncio.to_thread(self._query, "SELECT * FROM schedule WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=?", (now,))
@@ -999,10 +1529,13 @@ class TaskStore:
             "UPDATE schedule SET last_run_at=?,next_run_at=?,updated_at=? WHERE schedule_id=?", (last_run,next_run,_now(),schedule_id))
 
     async def schedule_has_active_run(self, schedule_id: str) -> bool:
-        rows = await asyncio.to_thread(self._query,
+        local_rows = await asyncio.to_thread(self._query,
             "SELECT 1 FROM crawl_run WHERE status IN ('queued','running','pausing','paused','waiting_for_login','waiting_for_space') AND config_json LIKE ? LIMIT 1",
             (f'%"schedule_id": "{schedule_id}"%',))
-        return bool(rows)
+        remote_rows = await asyncio.to_thread(self._query,
+            "SELECT 1 FROM remote_crawl_run WHERE status IN ('queued','running','pausing','paused','waiting_for_login','waiting_for_space') AND sanitized_config_json LIKE ? LIMIT 1",
+            (f'%"schedule_id": "{schedule_id}"%',))
+        return bool(local_rows or remote_rows)
 
     async def entity_exists(self, platform: str, entity_type: str, entity_id: str) -> bool:
         rows = await asyncio.to_thread(self._query, "SELECT 1 FROM entity_state WHERE platform=? AND entity_type=? AND entity_id=?", (platform,entity_type,entity_id))

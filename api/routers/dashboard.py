@@ -1,16 +1,16 @@
 """Product-oriented dashboard aggregates for the FlowLens WebUI."""
 from __future__ import annotations
 
-import hmac
 import os
 from collections import Counter
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from . import library as library_router
 from .system import health, storage
 from ..services.product_views import present_run
 from ..services.task_store import task_store
+from ..services.auth import Identity, require_password_changed
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -20,17 +20,11 @@ def _remote_enabled() -> bool:
 
 
 async def dashboard_identity(
-    x_flowlens_proxy_token: str | None = Header(None),
-    x_flowlens_user_id: str | None = Header(None),
+    identity: Identity = Depends(require_password_changed),
 ) -> str:
     if not _remote_enabled():
         return "__local__"
-    expected = os.getenv("FLOWLENS_TRUSTED_PROXY_TOKEN", "")
-    if not expected or not x_flowlens_proxy_token or not hmac.compare_digest(expected, x_flowlens_proxy_token):
-        raise HTTPException(401, "trusted proxy authentication required")
-    if not x_flowlens_user_id or len(x_flowlens_user_id) > 128:
-        raise HTTPException(401, "authenticated user context required")
-    return x_flowlens_user_id
+    return identity.user_id
 
 
 async def _local_runs() -> list[dict]:
@@ -74,6 +68,13 @@ async def overview(user_id: str = Depends(dashboard_identity)):
     if not remote:
         library_counts = {**library_counts, "media": await task_store.media_count()}
     health_data = await health()
+    if remote:
+        checks = health_data.get("checks", {})
+        health_data = {"status": health_data.get("status", "ok"), "checks": {
+            "execution_device": {"ok": any(item.get("status") == "online" for item in await task_store.list_workers())},
+            "asr": {"ok": bool(checks.get("faster_whisper", {}).get("ok"))},
+            "storage": {"ok": bool(checks.get("media_writable", {}).get("ok"))},
+        }}
     storage_data = await storage()
     return {
         "connection": connection,

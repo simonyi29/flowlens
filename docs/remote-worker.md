@@ -1,115 +1,151 @@
-# FlowLens 1.2 远程网站与 Worker 部署指南
+# FlowLens 1.3 远程网站、账号与 Worker 部署指南
 
-FlowLens 1.2 可以作为抓取 Worker 主动连接已有网站。网站用户在网页中扫描抓取机 Chrome 生成的抖音二维码，随后使用该用户独立的浏览器 Profile 创建采集任务。普通用户不需要也不会获得抓取机桌面、Cookie、CDP 地址或文件路径。
+FlowLens 1.3 内置用户名、密码和服务端会话。普通用户由管理员创建，不开放公众注册；每位用户可以连接多个自己的抖音账号，每个连接使用独立 Chrome Profile。用户在网站扫码后，可以选择具体账号创建任务。Cookie、Profile、CDP 地址和 Worker 私钥始终留在抓取设备。
 
-> 本功能仍受仓库非商业学习许可证约束。若要对外提供商业服务，必须先单独处理许可证、平台条款、隐私和数据合规问题。FlowLens 不绕过验证码、滑块或平台风险控制。
+> 本功能仍受仓库非商业学习许可证约束。若要对外提供商业服务，必须另行处理许可证、平台条款、隐私和数据合规问题。FlowLens 不绕过验证码、滑块或平台风险控制。
 
-## 架构与信任边界
+## 信任边界
 
 ```text
-用户浏览器 → 已有网站（现有登录会话） → FlowLens 控制 API
-                                      ↕ TLS/WSS + Ed25519
-                               FlowLens Worker → 127.0.0.1 CDP → Chrome
+用户浏览器 → FlowLens HTTPS 网站 → 服务端 Cookie 会话与 CSRF
+                                ↕ TLS/WSS + Ed25519
+                         FlowLens Worker → 127.0.0.1 CDP → Chrome
 ```
 
-- FlowLens API 不应直接暴露给浏览器或公网。现有网站后端完成用户认证后，反向代理 `/api/flowlens/*`，并注入 `X-FlowLens-Proxy-Token` 和服务端取得的 `X-FlowLens-User-ID`。
-- 不得从用户请求体转发 `user_id`。管理员接口还需由网站后端注入 `X-FlowLens-Role: admin`。
-- Worker 只建立出站 HTTPS/WSS 连接，不开放 HTTP 或 CDP 入站端口。Chrome CDP 固定监听 `127.0.0.1`。
-- `FLOWLENS_TRUSTED_PROXY_TOKEN` 只存在于网站后端和控制中心环境中，绝不能写进浏览器 JavaScript。WebUI 的 `VITE_FLOWLENS_*` 变量仅用于本机开发测试，不适用于生产。
+- 浏览器身份只来自 `HttpOnly` 的 `flowlens_session` Cookie。浏览器发送的用户 ID、角色和代理令牌一律不作为身份。
+- `FLOWLENS_TRUSTED_HEADER_COMPAT` 默认关闭，只能用于私有后端迁移，不能在浏览器中启用。
+- Worker 使用独立 Ed25519 注册和 challenge 签名，用户 Cookie 不进入 Worker 控制协议。
+- Worker 只建立出站 HTTPS/WSS 连接。Chrome CDP 固定监听 `127.0.0.1`。
+- 用户、连接、任务、结果、媒体和定时计划均按服务端会话中的 `user_id` 隔离。
 
 ## 控制中心配置
 
-生成两个独立的高熵随机值，并配置：
+开发环境示例：
 
 ```powershell
 $env:FLOWLENS_REMOTE_WORKER='true'
-$env:FLOWLENS_TRUSTED_PROXY_TOKEN='<至少 32 字节随机值>'
-$env:FLOWLENS_TENANT_HASH_KEY='<另一个至少 32 字节随机值>'
+$env:FLOWLENS_PUBLIC_ORIGIN='http://127.0.0.1:8080'
+$env:FLOWLENS_COOKIE_SECURE='false'
+$env:FLOWLENS_AUTH_HASH_KEY='<至少 32 字节的高熵随机值>'
+$env:FLOWLENS_TENANT_HASH_KEY='<另一个高熵随机值>'
 python -m api.main
 ```
 
-远程模式默认关闭。关闭 `FLOWLENS_REMOTE_WORKER` 即可回滚到 1.1 本机模式；本地 Profile、任务和已同步数据不会被删除。
+生产环境必须使用 HTTPS：
 
-网站后端需要代理以下路径：
+```text
+FLOWLENS_PUBLIC_ORIGIN=https://flowlens.example.com
+FLOWLENS_COOKIE_SECURE=true
+FLOWLENS_SESSION_IDLE_SECONDS=43200
+FLOWLENS_SESSION_ABSOLUTE_SECONDS=604800
+FLOWLENS_TEMP_PASSWORD_SECONDS=86400
+FLOWLENS_LOGIN_MAX_FAILURES=5
+FLOWLENS_LOGIN_LOCK_SECONDS=900
+FLOWLENS_AUTH_HASH_KEY=<高熵随机值>
+```
 
-- 用户 API：`/api/flowlens/*`
-- 用户事件：`/api/flowlens/events`
-- Worker 注册：`/internal/flowlens/workers/register`
-- Worker 控制通道：`/internal/flowlens/workers/connect`
-- Worker 媒体通道：`/internal/flowlens/workers/media/*`
+未配置安全来源、哈希密钥或 HTTPS 安全 Cookie时，启动健康提示会明确列出问题。关闭 `FLOWLENS_REMOTE_WORKER` 即回到免登录的本机模式，本地 Profile、任务和数据不会删除。
 
-所有通道必须使用 TLS。反向代理应关闭二维码响应缓存，并避免记录请求头、WebSocket 消息正文和媒体内容。二维码响应自带 `no-store`、`private`、`nosniff` 头，只在控制进程内存中保存最多 180 秒。
+## 初始化管理员
+
+第一位管理员只能从服务器本机创建：
+
+```powershell
+python -m tools.create_admin
+```
+
+命令会询问管理员用户名和显示名称，并打印一次性临时密码。临时密码 24 小时有效且只显示一次。首次登录必须设置 12～128 位正式密码。
+
+如果管理员忘记密码，在服务器本机执行：
+
+```powershell
+python -m tools.reset_admin_password --username <管理员用户名>
+```
+
+该命令只重置既有管理员，不创建第二个管理员，并撤销该管理员的全部网站会话。
+
+## 创建普通用户
+
+管理员首次改密后进入 `/#/admin/users`：
+
+1. 点击“创建用户”。
+2. 填写用户名、显示名称、抖音连接上限、任务上限和媒体配额。
+3. 保存仅显示一次的临时密码并安全交给用户。
+4. 用户从 `/#/login` 登录，并在 `/#/change-password` 设置正式密码。
+
+管理员可以暂停、恢复、撤销会话或重新生成临时密码，但不能在网页创建管理员、查看用户业务数据或使用用户抖音连接。
 
 ## 注册并运行 Worker
 
-管理员在“Worker 管理”页面生成一次性注册码。注册码有效期 10 分钟且只能消费一次。在抓取机执行：
+管理员在“执行设备”页生成 10 分钟一次性注册码，在抓取机执行：
 
 ```powershell
 python -m api.worker register `
-  --control-url https://control.example.com `
+  --control-url https://flowlens.example.com `
   --enrollment-code '<一次性注册码>' `
   --name worker-01
 
 python -m api.worker run
 ```
 
-Windows 抓取机也可以使用带自动重启的 `tools/start_flowlens_worker.ps1`：
+Windows 可用 `tools/start_flowlens_worker.ps1` 自动重连。Ed25519 私钥位于 `data/flowlens/worker/identity.pem`，只允许 Worker 系统账户读取，并已被 `.gitignore` 排除。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/start_flowlens_worker.ps1
+## 多抖音账号
+
+- 用户进入 `/#/connect`，可在配额内反复点击“连接新账号”。
+- 控制中心自动选择在线 Worker，用户不提交 Worker ID、路径或端口。
+- 每个连接一对一绑定独立 `profile_id` 和 Chrome Profile。
+- 登录完成后 Profile 保留，Chrome 空闲关闭；任务启动时使用同一 Profile。
+- 账号页支持备注、重新扫码和断开。断开只删除该连接的 Profile，历史结果保留。
+- 新建任务和远程定时计划必须选择一个属于当前用户且状态为 `connected` 的账号。
+
+## 会话与安全
+
+- 密码使用 Argon2id；数据库不保存明文密码或明文会话令牌。
+- Cookie 为 `HttpOnly`、`SameSite=Lax`，生产环境 `Secure=true`。
+- 所有写操作校验 `Origin` 和会话绑定的 `X-CSRF-Token`。
+- 空闲会话 12 小时、绝对会话 7 天；改密、暂停或撤销会话立即失效。
+- 同一用户名或来源连续 5 次失败后锁定 15 分钟；未知用户名和错误密码响应一致。
+- 登录尝试只保存带密钥不可逆哈希，审计日志禁止保存密码、Token、二维码、Cookie、Profile 路径和 CDP 地址。
+
+## 用户暂停与恢复
+
+暂停用户会立即撤销网站会话，向 Worker 下发任务暂停命令，并将未完成任务置为暂停。数据、媒体和 Chrome Profile保留。恢复后用户可以重新登录，但暂停任务不会自动恢复，需由用户手动继续。
+
+## 二维码、数据与媒体
+
+二维码只保存在控制进程内存，TTL 最多 180 秒，响应包含 `no-store`、`private`、`nosniff`；登录、取消或过期后删除。结构化数据通过 Worker outbox 幂等同步，原始响应不上传。
+
+正式媒体默认留在 `data/douyin/media`。网站按 `user_id + asset_id` 验证所有权后建立短期 Range 中继，不生成永久公开 URL。每个 Worker 默认最多两个并发媒体流。
+
+## 关键路由
+
+- 登录：`/#/login`
+- 首次改密：`/#/change-password`
+- 管理员用户：`/#/admin/users`
+- 抖音账号：`/#/connect`
+- 新建任务：`/#/crawl/new`
+- 任务中心：`/#/tasks`
+- 定时计划：`/#/schedules`
+
+认证 API：
+
+```text
+POST /api/auth/login
+GET  /api/auth/me
+POST /api/auth/change-password
+POST /api/auth/logout
+POST /api/auth/logout-all
 ```
 
-首次注册时会在 `data/flowlens/worker/identity.pem` 生成 Ed25519 私钥，并在 `worker.json` 保存非敏感设备配置。私钥只应允许 Worker 的系统账号读取。这两个文件均位于已被 `.gitignore` 排除的 `data/` 目录。
+管理员用户 API 以 `/api/admin/users` 为前缀；远程抖音、任务、结果和媒体 API 以 `/api/flowlens` 为前缀。完整 OpenAPI 位于 `/docs`。
 
-生产环境可用 Windows 任务计划或服务管理器启动 `python -m api.worker run`。Worker 会指数退避重连；控制中心 45 秒收不到心跳即可在网站侧判定离线。
+## 发布检查
 
-## 登录与采集流程
-
-1. 用户在网站的“抖音账号”页点击“连接抖音账号”；普通用户只看到友好的“执行设备”名称，不需要选择或理解 Worker。
-2. 控制中心生成不可预测的连接、登录会话和 Profile 标识，下发幂等命令。
-3. Worker 获取唯一抖音浏览器槽，以独立 Profile 启动 Chrome，只截取登录二维码区域并通过认证通道上传。
-4. 用户在网站扫描二维码。登录成功后二维码立即从内存删除，网站只保存脱敏昵称和不可逆账号 hash。
-5. 用户选择已连接账号创建关键词、真实话题、指定视频或指定账号任务。
-6. Worker 使用同一个 Profile 执行任务。Cookie 只从浏览器上下文同步到 Worker 进程内存，不进入命令、CLI、SQLite、日志或网站数据库。
-7. 作品、脱敏账号、话题、评论、字幕、指标和媒体元数据进入本地 outbox；网站 ACK 前保留，断线重连后按事件 ID 幂等重发。
-
-当前 Worker 一次只运行一个需要 Chrome/CDP 的抖音登录或网络采集操作。下载和 ASR 仍沿用 1.1 的有界后台规则。
-
-## 媒体播放
-
-正式媒体默认留在 `data/douyin/media`。网站请求媒体时先验证 `user_id + asset_id` 所有权，再建立 30 秒有效的内存中继会话。Worker 通过独立的签名认证 WebSocket 发送 1 MB 二进制块；控制心跳不会被视频流阻塞。
-
-Worker 只会读取本地任务库中已登记、解析后仍位于媒体根目录下的具体文件。支持标准单段 `Range`、`206`、`Content-Range` 和播放中断背压；每个 Worker 最多两个并发媒体流。不生成永久公开 URL。
-
-## 数据和隐私
-
-- 中央结果以 `user_id`、连接、任务和 Worker 归属保存，事件 ID 唯一，重复上报不会重复插入。
-- 同步前递归删除 Cookie、Token、授权头、原始 UID、`sec_uid`、CDP、代理凭据、签名参数和本地路径。
-- 原始响应即使在 Worker 本地启用，也不会通过远程同步通道上传。
-- 每个连接的 Profile 位于 `data/flowlens/browser/dy/{tenant_hash}/{profile_id}/profile`；标识必须满足固定格式，删除前再次解析并确认没有越过专用根目录。
-- 断开连接会拒绝仍有未完成任务的账号，随后由 Worker 删除具体 Profile；历史采集结果保留。
-
-## 网站集成约定
-
-本仓库内置的远程页面是网站用户端参考实现。正式接入现有网站时，应复用网站用户会话，并从服务端注入身份头。浏览器端不能自行生成这些身份头；`X-FlowLens-Role: admin` 只有同时通过受信代理令牌校验时才生效。关键接口包括：
-
-- `POST /api/flowlens/douyin/login-sessions`
-- `GET /api/flowlens/douyin/login-sessions/{id}/qr`
-- `GET /api/flowlens/douyin/connections`
-- `POST /api/flowlens/crawl-runs`
-- `POST /api/flowlens/crawl-runs/{id}/{pause|resume|cancel|retry-failed}`
-- `GET /api/flowlens/results/{entity_type}`
-- `GET /api/flowlens/results/aweme/{aweme_id}/detail`
-- `GET /api/flowlens/media/{asset_id}/stream`
-
-完整 OpenAPI 可在控制中心 `/docs` 查看。生产网站必须对每个查询和操作保持服务端所有权校验，不能依赖前端隐藏按钮。
-
-## 故障处理
-
-- `worker is offline`：确认 Worker 进程、TLS、DNS 和反向代理 WebSocket 升级配置。
-- `captcha_required` / `risk_controlled`：任务和检查点保留，由管理员通过既有运维渠道进入抓取机完成验证，再从网站继续；不要尝试自动绕过。
-- 二维码过期：点击刷新，旧二维码立即失效。
-- `worker did not open media stream`：确认资产尚在 Worker、本地媒体目录可读且 Worker 没有达到两个并发流上限。
-- 同步积压：恢复网络后 Worker 会重发未 ACK 事件；网站按事件 ID 幂等处理。
-
-发布前至少使用两个测试用户验证二维码、连接、任务、结果和媒体的交叉访问均返回 403/404，并检查中央数据库及日志中不存在 Cookie、原始 UID、二维码或 CDP 信息。
+1. 使用 CLI 创建管理员，确认网页没有注册入口或注册 API。
+2. 创建两个普通用户，分别完成首次改密。
+3. 用户 A 连接账号 A1、A2，用户 B 连接 B1，确认三个 Profile 不同。
+4. 交叉访问连接、二维码、任务、结果、媒体和计划必须返回 403/404。
+5. 暂停用户，确认网站会话失效、任务暂停；恢复后任务不自动继续。
+6. 检查浏览器构建产物中没有 `VITE_FLOWLENS_PROXY_TOKEN`、用户 ID 或角色 Header。
+7. 检查中央数据库和日志中没有 Cookie、二维码、原始 UID、Profile 路径或 CDP 地址。

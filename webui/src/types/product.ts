@@ -8,6 +8,8 @@ export interface FeatureCapabilities {
   media_stream: boolean
   asr: boolean
   admin: boolean
+  admin_console?: boolean
+  multiple_douyin_connections?: boolean
 }
 
 export interface Capabilities {
@@ -22,6 +24,8 @@ export interface ConnectionView {
   status: string
   creator_hash?: string
   masked_nickname?: string
+  display_name?: string
+  remark?: string
   last_verified_at?: string
   created_at?: string
 }

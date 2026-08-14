@@ -11,7 +11,7 @@ PROTOCOL_VERSION = "1.0"
 WorkerCommandType = Literal[
     "douyin.login.start", "douyin.login.refresh", "douyin.login.cancel",
     "douyin.session.check", "crawl.start", "crawl.pause", "crawl.resume",
-    "crawl.cancel", "crawl.retry_failed", "media.open", "profile.close",
+    "crawl.cancel", "crawl.retry_failed", "media.open", "media.delete", "profile.close",
     "profile.delete",
 ]
 

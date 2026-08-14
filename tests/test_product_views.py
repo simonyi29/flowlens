@@ -98,9 +98,10 @@ def test_capabilities_and_dashboard_overview(monkeypatch, tmp_path):
     assert {"health_summary", "storage_summary", "library_counts"} <= set(body)
 
 
-def test_remote_capabilities_do_not_trust_role_header_without_proxy_token(monkeypatch):
+def test_remote_capabilities_never_trust_browser_identity_headers(monkeypatch):
     monkeypatch.setenv("FLOWLENS_REMOTE_WORKER", "true")
     monkeypatch.setenv("FLOWLENS_TRUSTED_PROXY_TOKEN", "trusted-secret")
+    monkeypatch.delenv("FLOWLENS_TRUSTED_HEADER_COMPAT", raising=False)
     client = TestClient(app)
 
     forged = client.get("/api/system/capabilities", headers={"X-FlowLens-Role": "admin"})
@@ -108,10 +109,10 @@ def test_remote_capabilities_do_not_trust_role_header_without_proxy_token(monkey
     assert forged.json()["current_role"] == "user"
     assert forged.json()["features"]["admin"] is False
 
-    trusted = client.get(
+    forged_proxy = client.get(
         "/api/system/capabilities",
         headers={"X-FlowLens-Proxy-Token": "trusted-secret", "X-FlowLens-Role": "admin"},
     )
-    assert trusted.status_code == 200
-    assert trusted.json()["current_role"] == "admin"
-    assert trusted.json()["features"]["admin"] is True
+    assert forged_proxy.status_code == 200
+    assert forged_proxy.json()["current_role"] == "user"
+    assert forged_proxy.json()["features"]["admin"] is False

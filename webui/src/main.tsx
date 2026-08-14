@@ -6,6 +6,7 @@ import './index.css'
 import './i18n'
 // Initialize theme store early to prevent flash of wrong theme
 import './store/themeStore'
+import { AuthProvider } from '@/contexts/AuthContext'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -19,7 +20,7 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <AuthProvider><App /></AuthProvider>
     </QueryClientProvider>
   </React.StrictMode>,
 )
